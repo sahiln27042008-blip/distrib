@@ -190,27 +190,41 @@ Object.keys(PRESETS).forEach(function(key){
   pillContainer.appendChild(pill);
 });
 
-function runMatrix(){
+function runMatrix(mode){
   var cfg = readDials();
   setErr("Executing combinatorial simulation across 6 dials...");
+  var b1 = $("btnRunSelected");
+  var b2 = $("btnCompare");
+  if(b1) b1.disabled = true;
+  if(b2) b2.disabled = true;
   api("POST", "/api/matrix/run", { config: cfg }).then(function(res){
+    if(b1) b1.disabled = false;
+    if(b2) b2.disabled = false;
     matrixRes = res;
     setErr("");
-    renderMatrix(res);
-  }, function(e){ setErr(e.message); });
+    renderMatrix(res, mode);
+  }, function(e){
+    if(b1) b1.disabled = false;
+    if(b2) b2.disabled = false;
+    setErr(e.message);
+  });
 }
 
-$("btnRunSelected").onclick = runMatrix;
-$("btnCompare").onclick = runMatrix;
+$("btnRunSelected").onclick = function(){ runMatrix("selected"); };
+$("btnCompare").onclick = function(){ runMatrix("compare"); };
 $("btnReset").onclick = function(){
   applyPreset("login_freeze_db_hog");
-  runMatrix();
+  runMatrix("selected");
 };
 
-function renderMatrix(res){
+function renderMatrix(res, mode){
   var sel = res.selected, resl = res.resilient, vd = res.valueDelta;
 
   // Value Delta Banner
+  var vdBanner = $("valDeltaBanner");
+  if(vdBanner && mode === "compare"){
+    vdBanner.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
   $("roiSummary").textContent = "Net Monthly Savings: $" + vd.netMonthlySavings.toLocaleString() + " | Payback: " + vd.paybackDays + " days on $15k engagement";
   $("deltaPrompt").textContent = sel.context.promptTokens + " -> " + resl.context.promptTokens;
   $("deltaDbHold").textContent = sel.db.avgHoldMs + "ms -> " + resl.db.avgHoldMs + "ms";
@@ -219,12 +233,17 @@ function renderMatrix(res){
   $("deltaDupCharges").textContent = "$" + sel.network.duplicateDollars + " -> $" + resl.network.duplicateDollars;
   $("deltaCostTicket").textContent = "$" + sel.economics.costUsd.toFixed(2) + " -> $" + resl.economics.costUsd.toFixed(2);
 
-  // Quadrant 2: Hardware Telemetry
-  $("q2DbConn").textContent = sel.db.activeConnections + "/" + sel.db.poolSize + " active (" + sel.db.timeouts + " timeouts)";
+  // Quadrant 2: Hardware Telemetry Side-by-Side
+  $("q2DbConn").textContent = sel.db.activeConnections + "/" + sel.db.poolSize + " (" + sel.db.timeouts + " to)";
+  $("q2DbConnRes").textContent = resl.db.activeConnections + "/" + resl.db.poolSize + " (" + resl.db.timeouts + " to)";
   $("q2DbCpu").textContent = sel.db.cpuPct + "% CPU (" + sel.db.ramPct + "% RAM)";
-  $("q2Iops").textContent = sel.storage.iopsUsed + "% IOPS (" + (sel.storage.frozenQueries > 0 ? "FROZEN" : "normal") + ")";
-  $("q2Ttft").textContent = sel.context.ttftMs + " ms TTFT (" + sel.context.signalPct + "% signal)";
+  $("q2DbCpuRes").textContent = resl.db.cpuPct + "% CPU (" + resl.db.ramPct + "% RAM)";
+  $("q2Iops").textContent = sel.storage.iopsUsed + "% (" + (sel.storage.frozenQueries > 0 ? "FROZEN" : "ok") + ")";
+  $("q2IopsRes").textContent = resl.storage.iopsUsed + "% (ok)";
+  $("q2Ttft").textContent = sel.context.ttftMs + " ms (" + sel.context.signalPct + "% signal)";
+  $("q2TtftRes").textContent = resl.context.ttftMs + " ms (" + resl.context.signalPct + "% signal)";
   $("q2Host").textContent = sel.host.crashed ? "CRASHED (500)" : "ONLINE (100%)";
+  $("q2HostRes").textContent = resl.host.crashed ? "CRASHED" : "ONLINE (100%)";
 
   // Quadrant 3: Root Causes vs Code Fixes
   var rcBox = $("rootCausesList");
@@ -251,8 +270,8 @@ function renderMatrix(res){
   var fixSnippet = $("fixCodeSnippet");
   if(res.appliedFixes && res.appliedFixes.length > 0){
     fixSnippet.textContent = res.appliedFixes.map(function(f){
-      return "// " + f.invariantName + " (" + f.dial + ")\n// " + f.metricDelta + "\n" + f.codeSnippet;
-    }).join("\n\n");
+      return "// " + f.invariantName + " (" + f.dial + ")\\n// " + f.metricDelta + "\\n" + f.codeSnippet;
+    }).join("\\n\\n");
   } else {
     fixSnippet.textContent = "// System is running in Resilient Invariant state.";
   }
@@ -388,7 +407,7 @@ const BODY = `
   </div>
 
   <!-- Value Delta Banner -->
-  <div class="value-delta-banner">
+  <div id="valDeltaBanner" class="value-delta-banner">
     <div class="delta-header">
       <span class="delta-title">Enterprise Value Delta // ROI Assessment</span>
       <span id="roiSummary" class="delta-roi"></span>
@@ -431,14 +450,17 @@ const BODY = `
 
     <!-- Quadrant 2: Hardware Telemetry -->
     <div class="card">
-      <h2>Q2 // Hardware &amp; Telemetry Gauges</h2>
+      <h2>Q2 // Hardware &amp; Telemetry Gauges (Side-by-Side)</h2>
       <table>
+        <thead>
+          <tr><th>Hardware Gauge</th><th>Selected Setup</th><th>Resilient Invariant</th></tr>
+        </thead>
         <tbody>
-          <tr><th>Active DB Connections</th><td id="q2DbConn" class="mono text-danger">-</td></tr>
-          <tr><th>Database CPU / RAM</th><td id="q2DbCpu" class="mono">-</td></tr>
-          <tr><th>Storage Disk IOPS</th><td id="q2Iops" class="mono text-danger">-</td></tr>
-          <tr><th>TTFT Prompt Latency</th><td id="q2Ttft" class="mono">-</td></tr>
-          <tr><th>Host Process Uptime</th><td id="q2Host" class="mono text-danger">-</td></tr>
+          <tr><th>Active DB Connections</th><td id="q2DbConn" class="mono text-danger">-</td><td id="q2DbConnRes" class="mono text-success">-</td></tr>
+          <tr><th>Database CPU / RAM</th><td id="q2DbCpu" class="mono">-</td><td id="q2DbCpuRes" class="mono text-success">-</td></tr>
+          <tr><th>Storage Disk IOPS</th><td id="q2Iops" class="mono text-danger">-</td><td id="q2IopsRes" class="mono text-success">-</td></tr>
+          <tr><th>TTFT Latency</th><td id="q2Ttft" class="mono">-</td><td id="q2TtftRes" class="mono text-success">-</td></tr>
+          <tr><th>Host Process Uptime</th><td id="q2Host" class="mono text-danger">-</td><td id="q2HostRes" class="mono text-success">-</td></tr>
         </tbody>
       </table>
     </div>
