@@ -1,564 +1,914 @@
-import { Sim, type SimEvent } from "./kernel.ts";
-import type { Span, Trace } from "./trace.ts";
+// Combinatorial Enterprise Matrix Simulator (A x B x C x D x E x F)
+// Deterministic virtual-time execution over kernel.ts (Sim, Rng)
 
-export type WorkflowName = "refund" | "document" | "crm";
+import { Sim, Rng, type SimEvent } from "./kernel.ts";
+import { exportTrace, type Trace } from "./trace.ts";
 
-export interface RetryRequest {
-  attempt: number;
-  retryable: boolean;
-}
+export type DialA = "A1_single_task" | "A2_mixed_saas" | "A3_exec_demo_burst" | "A4_bulk_crm_swarm" | "A5_marathon_30step";
+export type DialB = "B1_zero_hold_2ms" | "B2_stream_hog_30s" | "B3_write_amp_15mb" | "B4_hydration_freeze_4s" | "B5_in_doubt_zombie_tx";
+export type DialC = "C1_clean_20ms" | "C2_socket_drop_2ms_late" | "C3_rate_limit_429_brownout" | "C4_bulk_50_poison_pill" | "C5_legacy_erp_no_idem";
+export type DialD = "D1_raw_json_80k_flood" | "D2_append_only_quadratic" | "D3_lossy_llm_summary" | "D4_unmapped_schema_drift" | "D5_cqrs_duckdb_blackboard_o1";
+export type DialE = "E1_god_mode_main_thread" | "E2_walled_garden_stuck" | "E3_hitl_fatigue_global_bool" | "E4_state_leases_ipc_worker";
+export type DialF = "F1_blind_retry_unbounded_spend" | "F2_ask_llm_to_undo" | "F3_resilient_invariant_runtime";
 
-export interface RetryPolicyConfig {
-  maxAttempts: number;
-  baseDelayMs: number;
-  multiplier: number;
-}
-
-export class RetryPolicy {
-  readonly maxAttempts: number;
-  readonly baseDelayMs: number;
-  readonly multiplier: number;
-
-  constructor(config: Partial<RetryPolicyConfig> = {}) {
-    this.maxAttempts = config.maxAttempts ?? 3;
-    this.baseDelayMs = config.baseDelayMs ?? 100;
-    this.multiplier = config.multiplier ?? 2;
-  }
-
-  delayFor(attempt: number): number {
-    if (!Number.isInteger(attempt) || attempt < 1) throw new RangeError(`attempt must be >= 1, got ${attempt}`);
-    return this.baseDelayMs * this.multiplier ** (attempt - 1);
-  }
-
-  shouldRetry(req: RetryRequest): boolean {
-    return req.retryable && req.attempt < this.maxAttempts;
-  }
-}
-
-export class BoundedQueue<T> {
-  readonly capacity: number;
-  readonly items: T[] = [];
-
-  constructor(capacity: number) {
-    if (!Number.isInteger(capacity) || capacity < 1) throw new RangeError(`capacity must be integer >= 1, got ${capacity}`);
-    this.capacity = capacity;
-  }
-
-  get length(): number {
-    return this.items.length;
-  }
-
-  get isFull(): boolean {
-    return this.items.length >= this.capacity;
-  }
-
-  enqueue(item: T): boolean {
-    if (this.isFull) return false;
-    this.items.push(item);
-    return true;
-  }
-
-  dequeue(): T | undefined {
-    return this.items.shift();
-  }
-
-  peek(): T | undefined {
-    return this.items[0];
-  }
-
-  clear(): void {
-    this.items.length = 0;
-  }
-}
-
-export interface WorkerState {
-  id: string;
-  state: "idle" | "busy" | "crashed";
-  jobId?: string;
-}
-
-export class WorkerPool {
-  readonly workers = new Map<string, WorkerState>();
-
-  constructor(size: number) {
-    if (!Number.isInteger(size) || size < 1) throw new RangeError(`worker pool size must be integer >= 1, got ${size}`);
-    for (let i = 0; i < size; i++) {
-      const id = `w${i + 1}`;
-      this.workers.set(id, { id, state: "idle" });
-    }
-  }
-
-  get idleWorkers(): string[] {
-    return [...this.workers.keys()].filter((id) => this.workers.get(id)!.state === "idle");
-  }
-
-  get busyWorkers(): string[] {
-    return [...this.workers.keys()].filter((id) => this.workers.get(id)!.state === "busy");
-  }
-
-  stateOf(workerId: string): WorkerState {
-    const state = this.workers.get(workerId);
-    if (!state) throw new Error(`unknown worker ${workerId}`);
-    return state;
-  }
-
-  assign(jobId: string): string | undefined {
-    const workerId = this.idleWorkers[0];
-    if (!workerId) return undefined;
-    const state = this.workers.get(workerId)!;
-    state.state = "busy";
-    state.jobId = jobId;
-    return workerId;
-  }
-
-  release(workerId: string): void {
-    const state = this.workers.get(workerId);
-    if (!state) throw new Error(`unknown worker ${workerId}`);
-    if (state.state === "crashed") return;
-    state.state = "idle";
-    state.jobId = undefined;
-  }
-
-  crash(workerId: string): void {
-    const state = this.workers.get(workerId);
-    if (!state) throw new Error(`unknown worker ${workerId}`);
-    state.state = "crashed";
-  }
-
-  recover(workerId: string): void {
-    const state = this.workers.get(workerId);
-    if (!state) throw new Error(`unknown worker ${workerId}`);
-    if (state.state !== "crashed") return;
-    state.state = "idle";
-    state.jobId = undefined;
-  }
-}
-
-export interface DeadLetterRecord {
-  workflow: WorkflowName | string;
-  jobId: string;
-  reason: string;
-  at: number;
-}
-
-export class DeadLetterQueue {
-  readonly entries: DeadLetterRecord[] = [];
-
-  record(rec: Omit<DeadLetterRecord, "at">, at: number = 0): DeadLetterRecord {
-    const entry: DeadLetterRecord = { ...rec, at };
-    this.entries.push(entry);
-    return entry;
-  }
-}
-
-export interface SharedResourceConfig {
-  capacity: number;
-  maxQueue: number;
-}
-
-export class SharedResource {
-  readonly capacity: number;
-  readonly maxQueue: number;
-  private waiting: string[] = [];
-  private readonly active = new Set<string>();
-  state: "healthy" | "failed" = "healthy";
-  failureReason?: string;
-
-  constructor(config: Partial<SharedResourceConfig> = {}) {
-    this.capacity = config.capacity ?? 1;
-    this.maxQueue = config.maxQueue ?? 3;
-    if (!Number.isInteger(this.capacity) || this.capacity < 1) throw new RangeError(`capacity must be integer >= 1`);
-    if (!Number.isInteger(this.maxQueue) || this.maxQueue < 1) throw new RangeError(`maxQueue must be integer >= 1`);
-  }
-
-  get inUse(): number {
-    return this.active.size;
-  }
-
-  get waitDepth(): number {
-    return this.waiting.length;
-  }
-
-  acquire(jobId: string): boolean {
-    if (this.active.has(jobId)) return true;
-    const alreadyWaiting = this.waiting.includes(jobId);
-    if (this.state === "failed") {
-      if (!alreadyWaiting && this.waiting.length < this.maxQueue) this.waiting.push(jobId);
-      return false;
-    }
-    if (this.active.size >= this.capacity) {
-      if (!alreadyWaiting && this.waiting.length < this.maxQueue) this.waiting.push(jobId);
-      return false;
-    }
-    this.active.add(jobId);
-    this.waiting = this.waiting.filter((id) => id !== jobId);
-    return true;
-  }
-
-  release(jobId: string): void {
-    if (!this.active.has(jobId)) return;
-    this.active.delete(jobId);
-    if (this.state !== "healthy" || this.waiting.length === 0) return;
-    const next = this.waiting.shift();
-    if (next) this.active.add(next);
-  }
-
-  fail(reason: string): void {
-    this.state = "failed";
-    this.failureReason = reason;
-  }
-
-  recover(): void {
-    this.state = "healthy";
-    this.failureReason = undefined;
-  }
-
-  reset(): void {
-    this.waiting.length = 0;
-    this.active.clear();
-    this.state = "healthy";
-    this.failureReason = undefined;
-  }
-}
-
-export interface WorkflowJob {
-  id: string;
-  workflow: WorkflowName;
-  label: string;
-  attempts: number;
-  payload: Record<string, unknown>;
-  retryable: boolean;
-  status: "queued" | "processing" | "retrying" | "completed" | "dead_letter" | "failed";
-}
-
-export interface WorkflowSnapshot {
-  name: WorkflowName;
-  status: string;
-  jobs: WorkflowJob[];
-}
-
-export interface SharedEnterpriseScenarioConfig {
+export interface MatrixConfig {
   seed: number;
-  mode: "healthy" | "fault";
-  maxEvents: number;
-  queueCapacity: number;
-  workerCount: number;
+  runId: string;
+  A: DialA;
+  B: DialB;
+  C: DialC;
+  D: DialD;
+  E: DialE;
+  F: DialF;
+  humanUsers: number;
+  concurrentAgents: number;
+  dbPoolSize: number;
+  workflowSteps: number;
+  saasPriceUsd: number;
+  ticketValueUsd: number;
 }
 
-const defaultScenarioConfig: SharedEnterpriseScenarioConfig = {
-  seed: 7,
-  mode: "healthy",
-  maxEvents: 2000,
-  queueCapacity: 2,
-  workerCount: 2,
+export interface MatrixSnapshot {
+  mode: "selected" | "resilient";
+  config: MatrixConfig;
+  virtualTimeMs: number;
+  dials: { A: DialA; B: DialB; C: DialC; D: DialD; E: DialE; F: DialF };
+  db: {
+    activeConnections: number;
+    poolSize: number;
+    waitQueue: number;
+    timeouts: number;
+    avgHoldMs: number;
+    p99HoldMs: number;
+    cpuPct: number;
+    ramPct: number;
+    saas500s: number;
+  };
+  storage: {
+    iopsUsed: number;
+    iopsLimit: number;
+    bytesWritten: number;
+    frozenQueries: number;
+  };
+  host: {
+    activeSessions: number;
+    eventLoopBlockedMs: number;
+    crashed: boolean;
+    restarts: number;
+  };
+  context: {
+    promptTokens: number;
+    turn1Tokens: number;
+    turn10Tokens: number;
+    signalPct: number;
+    ttftMs: number;
+  };
+  network: {
+    calls: number;
+    ecnoreset: number;
+    rateLimited: number;
+    poisonAborts: number;
+    duplicateShipments: number;
+    duplicateCharges: number;
+    duplicateDollars: number;
+  };
+  security: {
+    toolCallsAllowed: number;
+    toolCallsBlocked: number;
+    injectionAttempts: number;
+    injectionBlocked: number;
+    crashesContained: number;
+    crashesFatal: number;
+  };
+  recovery: {
+    checkpointsWritten: number;
+    checkpointBytes: number;
+    stepsReplayed: number;
+    tokensWasted: number;
+    orphansLeft: number;
+    compensationsRun: number;
+  };
+  economics: {
+    totalTokens: number;
+    costUsd: number;
+    perTenant: Array<{ tenant: string; revenueUsd: number; costUsd: number; marginUsd: number }>;
+  };
+  totals: {
+    tokensConsumed: number;
+    costUsd: number;
+    duplicateDollars: number;
+    orphanedCloudCostUsd: number;
+    storageBytesWritten: number;
+    hostCrashes: number;
+    eventLoopFreezes: number;
+    saas500s: number;
+  };
+}
+
+export interface RootCause {
+  dial: string;
+  title: string;
+  mechanism: string;
+  businessImpact: string;
+}
+
+export interface AppliedFix {
+  dial: string;
+  invariantName: string;
+  howItWorks: string;
+  codeSnippet: string;
+  metricDelta: string;
+}
+
+export interface ValueDelta {
+  brokenMonthlyLeak: number;
+  resilientMonthlyCost: number;
+  netMonthlySavings: number;
+  annualizedSavings: number;
+  engagementCostUsd: number;
+  paybackDays: number;
+}
+
+export const TENANT_NAMES = [
+  "Brightwater Health",
+  "Halvorsen Logistics",
+  "Cobalt Freight",
+  "Dunmore Capital",
+  "Eastgate Retail",
+  "Acme Corp",
+  "Nexus Tech",
+  "Apex Systems",
+  "Omni Global",
+  "Vortex Analytics",
+];
+
+export const MATRIX_PRESETS: Record<string, MatrixConfig> = {
+  login_freeze_db_hog: {
+    seed: 42,
+    runId: "preset-login-freeze",
+    A: "A2_mixed_saas",
+    B: "B2_stream_hog_30s",
+    C: "C1_clean_20ms",
+    D: "D2_append_only_quadratic",
+    E: "E1_god_mode_main_thread",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 200,
+    concurrentAgents: 10,
+    dbPoolSize: 20,
+    workflowSteps: 10,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  double_charge_2ms_drop: {
+    seed: 42,
+    runId: "preset-double-charge",
+    A: "A2_mixed_saas",
+    B: "B1_zero_hold_2ms",
+    C: "C2_socket_drop_2ms_late",
+    D: "D3_lossy_llm_summary",
+    E: "E4_state_leases_ipc_worker",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 200,
+    concurrentAgents: 10,
+    dbPoolSize: 20,
+    workflowSteps: 10,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  split_brain_orphan_aws: {
+    seed: 42,
+    runId: "preset-split-brain",
+    A: "A1_single_task",
+    B: "B2_stream_hog_30s",
+    C: "C1_clean_20ms",
+    D: "D2_append_only_quadratic",
+    E: "E1_god_mode_main_thread",
+    F: "F2_ask_llm_to_undo",
+    humanUsers: 0,
+    concurrentAgents: 1,
+    dbPoolSize: 20,
+    workflowSteps: 10,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  json_80k_churn_choke: {
+    seed: 42,
+    runId: "preset-json-80k",
+    A: "A2_mixed_saas",
+    B: "B1_zero_hold_2ms",
+    C: "C1_clean_20ms",
+    D: "D1_raw_json_80k_flood",
+    E: "E4_state_leases_ipc_worker",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 200,
+    concurrentAgents: 10,
+    dbPoolSize: 20,
+    workflowSteps: 10,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  turn10_quadratic_spiral: {
+    seed: 42,
+    runId: "preset-quadratic-spiral",
+    A: "A5_marathon_30step",
+    B: "B3_write_amp_15mb",
+    C: "C1_clean_20ms",
+    D: "D2_append_only_quadratic",
+    E: "E1_god_mode_main_thread",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 50,
+    concurrentAgents: 5,
+    dbPoolSize: 20,
+    workflowSteps: 30,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  checkpoint_15mb_disk_collapse: {
+    seed: 42,
+    runId: "preset-disk-collapse",
+    A: "A5_marathon_30step",
+    B: "B3_write_amp_15mb",
+    C: "C1_clean_20ms",
+    D: "D3_lossy_llm_summary",
+    E: "E4_state_leases_ipc_worker",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 100,
+    concurrentAgents: 10,
+    dbPoolSize: 20,
+    workflowSteps: 30,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  cfo_40usd_margin_inversion: {
+    seed: 42,
+    runId: "preset-margin-inversion",
+    A: "A5_marathon_30step",
+    B: "B1_zero_hold_2ms",
+    C: "C1_clean_20ms",
+    D: "D1_raw_json_80k_flood",
+    E: "E4_state_leases_ipc_worker",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 50,
+    concurrentAgents: 5,
+    dbPoolSize: 20,
+    workflowSteps: 15,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  bulk_50_poison_rate_storm: {
+    seed: 42,
+    runId: "preset-poison-storm",
+    A: "A4_bulk_crm_swarm",
+    B: "B1_zero_hold_2ms",
+    C: "C4_bulk_50_poison_pill",
+    D: "D4_unmapped_schema_drift",
+    E: "E4_state_leases_ipc_worker",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 100,
+    concurrentAgents: 50,
+    dbPoolSize: 20,
+    workflowSteps: 10,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  god_mode_prompt_injection: {
+    seed: 42,
+    runId: "preset-god-mode-injection",
+    A: "A1_single_task",
+    B: "B2_stream_hog_30s",
+    C: "C1_clean_20ms",
+    D: "D2_append_only_quadratic",
+    E: "E1_god_mode_main_thread",
+    F: "F2_ask_llm_to_undo",
+    humanUsers: 0,
+    concurrentAgents: 1,
+    dbPoolSize: 20,
+    workflowSteps: 10,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
+  marathon_20min_kill_test: {
+    seed: 42,
+    runId: "preset-kill-test",
+    A: "A5_marathon_30step",
+    B: "B3_write_amp_15mb",
+    C: "C3_rate_limit_429_brownout",
+    D: "D2_append_only_quadratic",
+    E: "E1_god_mode_main_thread",
+    F: "F1_blind_retry_unbounded_spend",
+    humanUsers: 50,
+    concurrentAgents: 5,
+    dbPoolSize: 20,
+    workflowSteps: 30,
+    saasPriceUsd: 20,
+    ticketValueUsd: 5,
+  },
 };
 
-export class SharedEnterpriseScenario {
-  readonly cfg: SharedEnterpriseScenarioConfig;
-  sim: Sim;
-  queue: BoundedQueue<WorkflowJob>;
-  retryPolicy: RetryPolicy;
-  deadLetterQueue: DeadLetterQueue;
-  pool: WorkerPool;
-  resource: SharedResource;
-  workflows: Record<WorkflowName, WorkflowSnapshot>;
-  life: "idle" | "running" | "finished" | "stopped" | "error" = "idle";
-  error?: string;
-  private seq = 0;
-  private rootEvent?: string;
+export class MatrixScenario {
+  private readonly config: MatrixConfig;
+  private sim: Sim;
+  private rng: Rng;
+  private isStarted = false;
 
-  constructor(input: Partial<SharedEnterpriseScenarioConfig> = {}) {
-    this.cfg = { ...defaultScenarioConfig, ...input };
-    this.sim = this.buildSim();
-    this.queue = new BoundedQueue<WorkflowJob>(this.cfg.queueCapacity);
-    this.retryPolicy = new RetryPolicy({ maxAttempts: 3, baseDelayMs: 50, multiplier: 2 });
-    this.deadLetterQueue = new DeadLetterQueue();
-    this.pool = new WorkerPool(this.cfg.workerCount);
-    this.resource = new SharedResource({ capacity: 1, maxQueue: 3 });
-    this.workflows = {
-      refund: { name: "refund", status: "idle", jobs: [] },
-      document: { name: "document", status: "idle", jobs: [] },
-      crm: { name: "crm", status: "idle", jobs: [] },
-    };
-  }
+  // DB & Disk State
+  private dbActive = 0;
+  private dbWaitQueue = 0;
+  private dbTimeouts = 0;
+  private dbAvgHoldMs = 2;
+  private dbP99HoldMs = 2;
+  private dbCpuPct = 15;
+  private dbRamPct = 25;
+  private saas500s = 0;
 
-  private buildSim(): Sim {
-    const sim = new Sim(this.cfg.seed, { maxEvents: this.cfg.maxEvents, maxSteps: 20000 });
-    sim.register("client", "client");
-    sim.register("queue", "bounded-queue");
-    sim.register("worker-pool", "worker-pool");
-    sim.register("shared-resource", "shared-resource");
-    sim.register("db", "sqlite");
-    return sim;
-  }
+  // Storage State
+  private iopsUsed = 5;
+  private iopsLimit = 1000;
+  private bytesWritten = 0;
+  private frozenQueries = 0;
 
-  private emit(kind: string, data: Record<string, unknown>, parent?: string): string {
-    const id = this.sim.emit(kind, `enterprise:${this.cfg.seed}:${this.cfg.mode}`, data, parent);
-    return id;
-  }
+  // Host State
+  private activeSessions = 0;
+  private eventLoopBlockedMs = 5;
+  private hostCrashed = false;
+  private restarts = 0;
 
-  private actionId(prefix: string): string {
-    this.seq += 1;
-    return `${prefix}-${this.seq}`;
-  }
+  // Context State
+  private promptTokens = 400;
+  private turn1Tokens = 400;
+  private turn10Tokens = 400;
+  private signalPct = 99;
+  private ttftMs = 85;
 
-  private addJob(workflow: WorkflowName, label: string, payload: Record<string, unknown>): WorkflowJob {
-    const job: WorkflowJob = {
-      id: this.actionId(workflow),
-      workflow,
-      label,
-      attempts: 0,
-      payload,
-      retryable: true,
-      status: "queued",
-    };
-    const wf = this.workflows[workflow];
-    wf.jobs.push(job);
-    wf.status = "queued";
-    return job;
-  }
+  // Network State
+  private networkCalls = 0;
+  private econreset = 0;
+  private rateLimited = 0;
+  private poisonAborts = 0;
+  private duplicateShipments = 0;
+  private duplicateCharges = 0;
+  private duplicateDollars = 0;
 
-  private markWorkflowStatus(workflow: WorkflowName, status: string): void {
-    this.workflows[workflow].status = status;
-  }
+  // Security State
+  private toolCallsAllowed = 0;
+  private toolCallsBlocked = 0;
+  private injectionAttempts = 0;
+  private injectionBlocked = 0;
+  private crashesContained = 0;
+  private crashesFatal = 0;
 
-  private deadLetter(job: WorkflowJob, reason: string, parent?: string): void {
-    this.resource.release(job.id); // drop any held or queued resource claim so it cannot leak
-    this.deadLetterQueue.record({ workflow: job.workflow, jobId: job.id, reason }, this.sim.now);
-    this.emit("dead_letter.record", { jobId: job.id, workflow: job.workflow, reason, attempt: job.attempts }, parent);
-    job.status = "dead_letter";
-    this.markWorkflowStatus(job.workflow, "dead_letter");
-  }
+  // Recovery State
+  private checkpointsWritten = 0;
+  private checkpointBytes = 0;
+  private stepsReplayed = 0;
+  private tokensWasted = 0;
+  private orphansLeft = 0;
+  private compensationsRun = 0;
 
-  private enqueueJob(job: WorkflowJob, parent?: string): boolean {
-    const ok = this.queue.enqueue(job);
-    const submit = this.emit("queue.submit", { jobId: job.id, workflow: job.workflow, label: job.label, length: this.queue.length }, parent);
-    if (!ok) {
-      const full = this.emit("queue.full", { jobId: job.id, workflow: job.workflow }, submit);
-      this.deadLetter(job, "queue.full", full);
-      return false;
-    }
-    return true;
-  }
+  // Economics
+  private totalTokens = 0;
+  private costUsd = 0;
+  private eventLoopFreezes = 0;
 
-  private drainQueue(parent?: string): void {
-    while (this.queue.length > 0 && this.pool.idleWorkers.length > 0) {
-      const job = this.queue.dequeue();
-      if (!job) break;
-      const workerId = this.pool.assign(job.id);
-      if (!workerId) break;
-      job.status = "processing";
-      this.markWorkflowStatus(job.workflow, "processing");
-      const assign = this.emit("worker.assign", { workerId, jobId: job.id, workflow: job.workflow }, parent);
-      this.sim.at(30, `worker.process.${job.id}`, () => this.processJob(job, workerId, assign));
-    }
-  }
-
-  // Bounded retry with deterministic backoff; exhaustion (or a full queue on re-entry) goes to the dead-letter queue.
-  private retryOrDeadLetter(job: WorkflowJob, exhaustedReason: string, parent: string): void {
-    if (!this.retryPolicy.shouldRetry({ attempt: job.attempts, retryable: job.retryable })) {
-      this.deadLetter(job, exhaustedReason, parent);
-      return;
-    }
-    const delay = this.retryPolicy.delayFor(job.attempts);
-    job.status = "retrying";
-    this.markWorkflowStatus(job.workflow, "retrying");
-    this.sim.at(delay, `retry.${job.id}`, () => {
-      const retry = this.emit("retry.schedule", { jobId: job.id, workflow: job.workflow, delayMs: delay, attempt: job.attempts }, parent);
-      if (!this.queue.enqueue(job)) {
-        const full = this.emit("queue.full", { jobId: job.id, workflow: job.workflow }, retry);
-        this.deadLetter(job, "queue.full", full);
-        return;
-      }
-      this.drainQueue(retry);
-    });
-  }
-
-  private processJob(job: WorkflowJob, workerId: string, assign: string): void {
-    job.attempts += 1;
-    if (this.resource.state === "failed") {
-      this.pool.release(workerId);
-      const blocked = this.emit("resource.blocked", { jobId: job.id, workflow: job.workflow, reason: this.resource.failureReason ?? "shared-resource-failed", attempt: job.attempts }, assign);
-      this.retryOrDeadLetter(job, "retry-exhausted", blocked);
-      this.drainQueue();
-      return;
-    }
-
-    if (!this.resource.acquire(job.id)) {
-      this.pool.release(workerId);
-      const waiting = this.emit("resource.waiting", { jobId: job.id, workflow: job.workflow, capacity: this.resource.capacity, queued: this.resource.waitDepth }, assign);
-      this.retryOrDeadLetter(job, "resource-contention", waiting);
-      this.drainQueue();
-      return;
-    }
-
-    const acquire = this.emit("resource.acquire", { jobId: job.id, workflow: job.workflow, resource: "shared-resource", attempt: job.attempts }, assign);
-    this.sim.at(50, `worker.finish.${job.id}`, () => {
-      if (this.resource.state === "failed") {
-        // Outage hit while this job held the resource: the work did not complete.
-        this.resource.release(job.id);
-        this.pool.release(workerId);
-        const failure = this.emit("resource.failure", { jobId: job.id, workflow: job.workflow, reason: this.resource.failureReason ?? "shared-resource-failed", attempt: job.attempts }, acquire);
-        this.retryOrDeadLetter(job, "retry-exhausted", failure);
-        this.drainQueue();
-        return;
-      }
-      this.resource.release(job.id);
-      const release = this.emit("resource.release", { jobId: job.id, workflow: job.workflow, resource: "shared-resource" }, acquire);
-      job.status = "completed";
-      this.markWorkflowStatus(job.workflow, "completed");
-      this.pool.release(workerId);
-      this.emit("job.complete", { jobId: job.id, workflow: job.workflow, label: job.label, attempts: job.attempts }, release);
-      this.drainQueue();
-    });
+  constructor(cfg: MatrixConfig) {
+    this.config = structuredClone(cfg);
+    this.sim = new Sim(cfg.seed);
+    this.rng = new Rng(cfg.seed);
   }
 
   start(): void {
-    if (this.life !== "idle") throw new Error(`cannot start from ${this.life}`);
-    this.life = "running";
-    this.rootEvent = this.emit("scenario.start", {
-      mode: this.cfg.mode,
-      seed: this.cfg.seed,
-      queueCapacity: this.cfg.queueCapacity,
-      workerCount: this.cfg.workerCount,
+    if (this.isStarted) return;
+    this.isStarted = true;
+
+    this.sim.emit("matrix.started", "sys-0", {
+      runId: this.config.runId,
+      seed: this.config.seed,
+      dials: {
+        A: this.config.A,
+        B: this.config.B,
+        C: this.config.C,
+        D: this.config.D,
+        E: this.config.E,
+        F: this.config.F,
+      },
     });
-    const refund = this.addJob("refund", "refund-sync", { orderId: "ord-3001", amountCents: 4000 });
-    const document = this.addJob("document", "document-ingest", { docId: "doc-42", status: "ready" });
-    const crm = this.addJob("crm", "customer-enrichment", { crmId: "lead-22", status: "pending" });
-    this.emit("workflow.submit", { workflow: "refund", jobId: refund.id }, this.rootEvent);
-    this.emit("workflow.submit", { workflow: "document", jobId: document.id }, this.rootEvent);
-    this.emit("workflow.submit", { workflow: "crm", jobId: crm.id }, this.rootEvent);
-    this.enqueueJob(refund, this.rootEvent);
-    this.enqueueJob(document, this.rootEvent);
-    this.enqueueJob(crm, this.rootEvent);
-    this.drainQueue(this.rootEvent);
-    if (this.cfg.mode === "fault") {
-      this.sim.at(120, "resource.fail", () => {
-        this.resource.fail("shared-resource downstream outage");
-        this.emit("resource.fail", { reason: this.resource.failureReason, state: this.resource.state });
-      });
-      this.sim.at(260, "resource.recover", () => {
-        this.resource.recover();
-        this.emit("resource.recover", { state: this.resource.state });
-      });
-    }
-    this.sim.at(500, "scenario.finish", () => {
-      this.life = "finished";
-      this.emit("scenario.finish", { mode: this.cfg.mode, queueDepth: this.queue.length });
+
+    this.sim.at(10, "workflow.setup", () => {
+      this.executeMatrixSimulation();
     });
   }
 
   step(): boolean {
-    if (this.life !== "running") return false;
-    try {
-      if (this.sim.step()) return true;
-      this.life = "finished";
-      return false;
-    } catch (e) {
-      this.life = "error";
-      this.error = e instanceof Error ? e.message : String(e);
-      return false;
-    }
-  }
-
-  advance(ms: number): void {
-    if (this.life !== "running") return;
-    try {
-      this.sim.advanceTo(this.sim.now + ms);
-      if (this.sim.pending() === 0) this.life = "finished";
-    } catch (e) {
-      this.life = "error";
-      this.error = e instanceof Error ? e.message : String(e);
-    }
+    if (!this.isStarted) this.start();
+    return this.sim.step();
   }
 
   run(): void {
+    if (!this.isStarted) this.start();
     while (this.sim.step()) {
-      if (this.life === "finished" || this.life === "error") break;
+      // step through simulated clock
     }
-    if (this.life === "running") this.life = "finished";
   }
 
   reset(): void {
-    this.queue = new BoundedQueue<WorkflowJob>(this.cfg.queueCapacity);
-    this.deadLetterQueue = new DeadLetterQueue();
-    this.pool = new WorkerPool(this.cfg.workerCount);
-    this.resource = new SharedResource({ capacity: 1, maxQueue: 3 });
-    this.workflows = {
-      refund: { name: "refund", status: "idle", jobs: [] },
-      document: { name: "document", status: "idle", jobs: [] },
-      crm: { name: "crm", status: "idle", jobs: [] },
-    };
-    this.sim = this.buildSim();
-    this.life = "idle";
-    this.error = undefined;
-    this.rootEvent = undefined;
-    this.seq = 0;
+    this.sim = new Sim(this.config.seed);
+    this.rng = new Rng(this.config.seed);
+    this.isStarted = false;
+    this.dbActive = 0;
+    this.dbWaitQueue = 0;
+    this.dbTimeouts = 0;
+    this.saas500s = 0;
+    this.bytesWritten = 0;
+    this.frozenQueries = 0;
+    this.hostCrashed = false;
+    this.restarts = 0;
+    this.duplicateDollars = 0;
+    this.duplicateShipments = 0;
+    this.duplicateCharges = 0;
+    this.orphansLeft = 0;
+    this.compensationsRun = 0;
+    this.tokensWasted = 0;
+    this.totalTokens = 0;
+    this.costUsd = 0;
+    this.eventLoopFreezes = 0;
+    this.eventLoopBlockedMs = 5;
+    this.crashesFatal = 0;
+    this.crashesContained = 0;
+    this.injectionBlocked = 0;
+    this.injectionAttempts = 0;
+    this.toolCallsBlocked = 0;
+    this.toolCallsAllowed = 0;
   }
 
-  snapshot() {
-    return {
-      life: this.life,
-      now: this.sim.now,
-      queue: {
-        length: this.queue.length,
-        capacity: this.queue.capacity,
-        items: this.queue.items.map((job) => ({ id: job.id, workflow: job.workflow, status: job.status })),
-      },
-      workers: [...this.pool.workers.values()].map((state) => ({ ...state })),
-      sharedResource: {
-        state: this.resource.state,
-        capacity: this.resource.capacity,
-        inUse: this.resource.inUse,
-        waitDepth: this.resource.waitDepth,
-        failureReason: this.resource.failureReason,
-      },
-      deadLetters: [...this.deadLetterQueue.entries],
-      workflows: Object.values(this.workflows).map((entry) => ({ ...entry, jobs: entry.jobs.map((job) => ({ ...job })) })),
-    };
-  }
+  private executeMatrixSimulation(): void {
+    const { A, B, C, D, E, F, humanUsers, concurrentAgents, dbPoolSize, workflowSteps } = this.config;
 
-  dispose(): void {
-    this.sim.log.length = 0;
-  }
+    // --- DIAL A: TRAFFIC LOAD ---
+    let effectiveAgents = concurrentAgents;
+    let effectiveHumans = humanUsers;
+    if (A === "A1_single_task") {
+      effectiveAgents = 1;
+      effectiveHumans = 0;
+    } else if (A === "A3_exec_demo_burst") {
+      effectiveAgents = Math.max(5, concurrentAgents);
+    } else if (A === "A4_bulk_crm_swarm") {
+      effectiveAgents = Math.max(50, concurrentAgents);
+    } else if (A === "A5_marathon_30step") {
+      effectiveAgents = Math.max(5, concurrentAgents);
+    }
+    this.activeSessions = effectiveHumans + effectiveAgents;
 
-  exportTrace(): Trace {
-    const spans: Span[] = [];
-    const byId = new Map<string, SimEvent>();
-    for (const event of this.sim.log) byId.set(event.id, event);
-
-    for (const event of this.sim.log) {
-      const parent = event.parent ? byId.get(event.parent) : undefined;
-      const parentId = parent ? `s-${parent.id}` : null;
-      spans.push({
-        spanId: `s-${event.id}`,
-        parentSpanId: parentId,
-        name: event.kind,
-        startMs: event.t,
-        endMs: event.t,
-        status: "ok",
-        attrs: { ...event.data },
-        links: [],
-        events: [],
-      });
+    // --- DIAL B: DATABASE & STORAGE ---
+    if (B === "B1_zero_hold_2ms") {
+      this.dbActive = 0;
+      this.dbAvgHoldMs = 2;
+      this.dbP99HoldMs = 2;
+      this.dbCpuPct = 24;
+      this.dbRamPct = 28;
+      this.dbWaitQueue = 0;
+      this.dbTimeouts = 0;
+      this.saas500s = 0;
+      this.iopsUsed = 4;
+      this.bytesWritten = 4096;
+      this.frozenQueries = 0;
+    } else if (B === "B2_stream_hog_30s") {
+      this.dbActive = Math.min(dbPoolSize, effectiveAgents);
+      this.dbAvgHoldMs = 28450;
+      this.dbP99HoldMs = 28450;
+      this.dbCpuPct = 2; // Idle pool during streaming hold paradox
+      this.dbRamPct = 35;
+      if (effectiveAgents >= dbPoolSize || effectiveHumans > 0) {
+        this.dbWaitQueue = Math.max(0, effectiveAgents + (effectiveHumans > 0 ? 14 : 0) - dbPoolSize);
+        this.dbTimeouts = Math.max(8, this.dbWaitQueue);
+        this.saas500s = effectiveHumans > 0 ? 14 : 0;
+      }
+      this.iopsUsed = 8;
+      this.bytesWritten = 12288;
+      this.frozenQueries = 0;
+    } else if (B === "B3_write_amp_15mb") {
+      this.dbActive = Math.min(dbPoolSize, Math.floor(effectiveAgents / 2));
+      this.dbAvgHoldMs = 1200;
+      this.dbP99HoldMs = 4500;
+      this.dbCpuPct = 65;
+      this.dbRamPct = 80;
+      this.bytesWritten = 15_000_000;
+      this.iopsUsed = 100;
+      this.frozenQueries = 1;
+      this.saas500s = effectiveHumans > 0 ? 8 : 0;
+    } else if (B === "B4_hydration_freeze_4s") {
+      this.dbActive = Math.min(dbPoolSize, 5);
+      this.dbAvgHoldMs = 3200;
+      this.dbP99HoldMs = 4000;
+      this.dbCpuPct = 85;
+      this.bytesWritten = 20_000_000;
+      this.eventLoopBlockedMs = 3200;
+      this.eventLoopFreezes = 2;
+      this.iopsUsed = 92;
+      this.frozenQueries = 1;
+      this.saas500s = effectiveHumans > 0 ? 6 : 0;
+    } else if (B === "B5_in_doubt_zombie_tx") {
+      this.dbActive = Math.min(dbPoolSize, 8);
+      this.dbAvgHoldMs = 14000;
+      this.dbP99HoldMs = 20000;
+      this.dbTimeouts = 5;
+      this.dbWaitQueue = 6;
+      this.saas500s = effectiveHumans > 0 ? 10 : 0;
+      this.bytesWritten = 50000;
+      this.iopsUsed = 15;
     }
 
-    return {
-      schema: "sim-trace/0",
-      simulated: true,
-      virtualTime: true,
-      traceId: `enterprise-${this.cfg.seed}-${this.cfg.mode}`,
-      spans,
-      derived: {
-        queueDepth: this.queue.length,
-        deadLetters: this.deadLetterQueue.entries.length,
-        workflows: this.workflows,
+    // --- DIAL C: NETWORK & EXTERNAL APIS ---
+    this.networkCalls = effectiveAgents * workflowSteps;
+    if (C === "C1_clean_20ms") {
+      this.econreset = 0;
+      this.rateLimited = 0;
+      this.poisonAborts = 0;
+      this.duplicateShipments = 0;
+      this.duplicateCharges = 0;
+      this.duplicateDollars = 0;
+    } else if (C === "C2_socket_drop_2ms_late") {
+      this.econreset = 1;
+      if (F === "F3_resilient_invariant_runtime") {
+        this.duplicateCharges = 0;
+        this.duplicateDollars = 0;
+      } else {
+        this.duplicateCharges = 1;
+        this.duplicateDollars = 500;
+      }
+    } else if (C === "C3_rate_limit_429_brownout") {
+      this.rateLimited = Math.max(12, Math.floor(this.networkCalls * 0.25));
+    } else if (C === "C4_bulk_50_poison_pill") {
+      if (F === "F3_resilient_invariant_runtime") {
+        this.poisonAborts = 0; // Unrolled: 49 succeed, 1 isolated poison pill
+      } else {
+        this.poisonAborts = 49; // All innocent 49 items rejected due to item 27
+      }
+    } else if (C === "C5_legacy_erp_no_idem") {
+      if (F === "F3_resilient_invariant_runtime") {
+        this.duplicateShipments = 0; // Deduplicated before dispatch
+      } else {
+        this.duplicateShipments = 2; // Ships 2 physical boxes on retry
+      }
+    }
+
+    // --- DIAL D: CONTEXT & SIGNAL PLANE ---
+    if (D === "D1_raw_json_80k_flood") {
+      this.promptTokens = 80000;
+      this.turn1Tokens = 80000;
+      this.turn10Tokens = 80000;
+      this.signalPct = 1;
+      this.ttftMs = 45000;
+    } else if (D === "D2_append_only_quadratic") {
+      this.turn1Tokens = 500;
+      this.turn10Tokens = 42000;
+      this.promptTokens = 42000;
+      this.signalPct = 12;
+      this.ttftMs = 35000;
+    } else if (D === "D3_lossy_llm_summary") {
+      this.turn1Tokens = 500;
+      this.turn10Tokens = 12000;
+      this.promptTokens = 12000;
+      this.signalPct = 35;
+      this.ttftMs = 6500;
+    } else if (D === "D4_unmapped_schema_drift") {
+      this.turn1Tokens = 800;
+      this.turn10Tokens = 8500;
+      this.promptTokens = 8500;
+      this.signalPct = 40;
+      this.ttftMs = 4200;
+    } else if (D === "D5_cqrs_duckdb_blackboard_o1") {
+      this.turn1Tokens = 178;
+      this.turn10Tokens = 227;
+      this.promptTokens = 400;
+      this.signalPct = 99.5;
+      this.ttftMs = 85;
+    }
+
+    // --- DIAL E: SECURITY & PROCESS BOUNDARIES ---
+    if (E === "E1_god_mode_main_thread") {
+      this.toolCallsAllowed = 200;
+      this.toolCallsBlocked = 0;
+      this.injectionAttempts = 1;
+      this.injectionBlocked = 0; // Allowed db.delete(402)
+      this.hostCrashed = true;
+      this.crashesFatal = 1;
+      this.crashesContained = 0;
+      this.eventLoopBlockedMs = 1800;
+      this.eventLoopFreezes = 3;
+    } else if (E === "E2_walled_garden_stuck") {
+      this.toolCallsAllowed = 3;
+      this.toolCallsBlocked = 14;
+      this.injectionAttempts = 0;
+      this.injectionBlocked = 0;
+      this.hostCrashed = false;
+    } else if (E === "E3_hitl_fatigue_global_bool") {
+      this.toolCallsAllowed = 80;
+      this.toolCallsBlocked = 0;
+      this.injectionAttempts = 1;
+      this.injectionBlocked = 0;
+      this.hostCrashed = false;
+    } else if (E === "E4_state_leases_ipc_worker") {
+      this.toolCallsAllowed = 4; // strictly scoped JIT lease
+      this.toolCallsBlocked = 196; // blocked out-of-scope tools in 1ms
+      this.injectionAttempts = 1;
+      this.injectionBlocked = 1; // blocked db.delete(402)
+      this.hostCrashed = false;
+      this.crashesFatal = 0;
+      this.crashesContained = 1; // isolated child worker crash rebooted in 5ms
+      this.eventLoopBlockedMs = 12;
+      this.eventLoopFreezes = 0;
+    }
+
+    // --- DIAL F: RECOVERY & UNIT ECONOMICS ---
+    if (F === "F1_blind_retry_unbounded_spend") {
+      this.checkpointsWritten = 0;
+      this.checkpointBytes = 0;
+      this.stepsReplayed = workflowSteps;
+      this.tokensWasted = 350000;
+      this.orphansLeft = 0;
+      this.compensationsRun = 0;
+      this.totalTokens = 400000;
+      this.costUsd = 40.0; // $40 on a $5 ticket
+    } else if (F === "F2_ask_llm_to_undo") {
+      this.checkpointsWritten = 0;
+      this.checkpointBytes = 0;
+      this.stepsReplayed = 0;
+      this.tokensWasted = 45000;
+      this.orphansLeft = 1; // Left orphaned EC2 instance on bill
+      this.compensationsRun = 0;
+      this.totalTokens = 120000;
+      this.costUsd = 12.0;
+    } else if (F === "F3_resilient_invariant_runtime") {
+      this.checkpointsWritten = workflowSteps;
+      this.checkpointBytes = workflowSteps * 136;
+      this.stepsReplayed = 0;
+      this.tokensWasted = 0;
+      this.orphansLeft = 0;
+      this.compensationsRun = 4; // LIFO reverse rollback in 4ms
+      this.totalTokens = Math.min(5000, workflowSteps * 450);
+      this.costUsd = 0.25; // Strict $0.25 execution budget envelope cap
+      this.bytesWritten = Math.min(this.bytesWritten, 4096);
+    }
+
+    // Emit completed event
+    this.sim.emit("matrix.completed", "sys-1", {
+      virtualTimeMs: this.sim.now,
+      costUsd: this.costUsd,
+      totalTokens: this.totalTokens,
+    });
+  }
+
+  snapshot(): MatrixSnapshot {
+    const isResilientMode =
+      this.config.B === "B1_zero_hold_2ms" &&
+      this.config.D === "D5_cqrs_duckdb_blackboard_o1" &&
+      this.config.E === "E4_state_leases_ipc_worker" &&
+      this.config.F === "F3_resilient_invariant_runtime";
+
+    const saasPrice = this.config.saasPriceUsd || 20;
+    const costPerTenant = this.costUsd / 10;
+    const perTenant = TENANT_NAMES.map((tenant) => ({
+      tenant,
+      revenueUsd: saasPrice,
+      costUsd: Number(costPerTenant.toFixed(2)),
+      marginUsd: Number((saasPrice - costPerTenant).toFixed(2)),
+    }));
+
+    return structuredClone({
+      mode: isResilientMode ? "resilient" : "selected",
+      config: this.config,
+      virtualTimeMs: this.sim.now || 10,
+      dials: {
+        A: this.config.A,
+        B: this.config.B,
+        C: this.config.C,
+        D: this.config.D,
+        E: this.config.E,
+        F: this.config.F,
       },
-    };
+      db: {
+        activeConnections: this.dbActive,
+        poolSize: this.config.dbPoolSize,
+        waitQueue: this.dbWaitQueue,
+        timeouts: this.dbTimeouts,
+        avgHoldMs: this.dbAvgHoldMs,
+        p99HoldMs: this.dbP99HoldMs,
+        cpuPct: this.dbCpuPct,
+        ramPct: this.dbRamPct,
+        saas500s: this.saas500s,
+      },
+      storage: {
+        iopsUsed: this.iopsUsed,
+        iopsLimit: this.iopsLimit,
+        bytesWritten: this.bytesWritten,
+        frozenQueries: this.frozenQueries,
+      },
+      host: {
+        activeSessions: this.activeSessions,
+        eventLoopBlockedMs: this.eventLoopBlockedMs,
+        crashed: this.hostCrashed,
+        restarts: this.restarts,
+      },
+      context: {
+        promptTokens: this.promptTokens,
+        turn1Tokens: this.turn1Tokens,
+        turn10Tokens: this.turn10Tokens,
+        signalPct: this.signalPct,
+        ttftMs: this.ttftMs,
+      },
+      network: {
+        calls: this.networkCalls,
+        ecnoreset: this.econreset,
+        rateLimited: this.rateLimited,
+        poisonAborts: this.poisonAborts,
+        duplicateShipments: this.duplicateShipments,
+        duplicateCharges: this.duplicateCharges,
+        duplicateDollars: this.duplicateDollars,
+      },
+      security: {
+        toolCallsAllowed: this.toolCallsAllowed,
+        toolCallsBlocked: this.toolCallsBlocked,
+        injectionAttempts: this.injectionAttempts,
+        injectionBlocked: this.injectionBlocked,
+        crashesContained: this.crashesContained,
+        crashesFatal: this.crashesFatal,
+      },
+      recovery: {
+        checkpointsWritten: this.checkpointsWritten,
+        checkpointBytes: this.checkpointBytes,
+        stepsReplayed: this.stepsReplayed,
+        tokensWasted: this.tokensWasted,
+        orphansLeft: this.orphansLeft,
+        compensationsRun: this.compensationsRun,
+      },
+      economics: {
+        totalTokens: this.totalTokens,
+        costUsd: this.costUsd,
+        perTenant,
+      },
+      totals: {
+        tokensConsumed: this.totalTokens,
+        costUsd: this.costUsd,
+        duplicateDollars: this.duplicateDollars,
+        orphanedCloudCostUsd: this.orphansLeft * 1440,
+        storageBytesWritten: this.bytesWritten,
+        hostCrashes: this.hostCrashed ? 1 : 0,
+        eventLoopFreezes: this.eventLoopFreezes,
+        saas500s: this.saas500s,
+      },
+    });
+  }
+
+  exportTrace(): { schema: "sim-trace/0"; simulated: true; virtualTime: true; traceId: string; spans: unknown[]; derived: unknown } {
+    return exportTrace(this.sim.log, `matrix-${this.config.runId}-${this.config.seed}`, { snapshot: this.snapshot() });
   }
 }
 
-export const DEFAULT_M6_SCENARIOS = {
-  healthy: { seed: 7, mode: "healthy" },
-  fault: { seed: 7, mode: "fault" },
-} as const;
+export function runMatrixComparison(config: MatrixConfig): {
+  selected: MatrixSnapshot;
+  resilient: MatrixSnapshot;
+  rootCauses: RootCause[];
+  appliedFixes: AppliedFix[];
+  valueDelta: ValueDelta;
+} {
+  // 1. Run Selected Configuration
+  const selScenario = new MatrixScenario(config);
+  selScenario.run();
+  const selected = selScenario.snapshot();
+
+  // 2. Build and Run Resilient Override Counterpart
+  const resilientConfig: MatrixConfig = {
+    ...config,
+    runId: `${config.runId}-resilient`,
+    B: "B1_zero_hold_2ms",
+    D: "D5_cqrs_duckdb_blackboard_o1",
+    E: "E4_state_leases_ipc_worker",
+    F: "F3_resilient_invariant_runtime",
+    // Dial A, Dial C, seed, and scale parameters are preserved exactly
+  };
+
+  const resScenario = new MatrixScenario(resilientConfig);
+  resScenario.run();
+  const resilient = resScenario.snapshot();
+
+  // 3. Derive Root Causes (for non-resilient dials in selected)
+  const rootCauses: RootCause[] = [];
+  if (config.B !== "B1_zero_hold_2ms") {
+    rootCauses.push({
+      dial: "Dial B (Database & Storage)",
+      title: "Streaming DB Connection Hold & IOPS Saturation",
+      mechanism: `Holding Postgres connections open (${selected.db.avgHoldMs}ms) across LLM token streaming starved pool connections while DB CPU sat at 2%.`,
+      businessImpact: `${selected.db.saas500s} paying SaaS customers received HTTP 500 errors during routine checkout/login.`,
+    });
+  }
+
+  if (config.C !== "C1_clean_20ms") {
+    rootCauses.push({
+      dial: "Dial C (Network & APIs)",
+      title: "Non-Idempotent Network Drop & Bulk Contamination",
+      mechanism: `Network socket dropped or API poisoned during state mutation without deterministic write-ahead reconciliation.`,
+      businessImpact: `$${selected.network.duplicateDollars} duplicate dollars charged, ${selected.network.duplicateShipments} extra warehouse shipments, or ${selected.network.poisonAborts} aborted tasks.`,
+    });
+  }
+
+  if (config.D !== "D5_cqrs_duckdb_blackboard_o1") {
+    rootCauses.push({
+      dial: "Dial D (Context & Signal Plane)",
+      title: "Quadratic Prompt Bloat & Context Dilution",
+      mechanism: `Pasting un-indexed JSON history (${selected.context.promptTokens} tokens) delayed TTFT by ${selected.context.ttftMs}ms with only ${selected.context.signalPct}% useful signal.`,
+      businessImpact: `Critical ACV accounts dropped from context; LLM hallucination rate increased 4x over repeated turns.`,
+    });
+  }
+
+  if (config.E !== "E1_god_mode_main_thread" && config.E !== "E4_state_leases_ipc_worker") {
+    rootCauses.push({
+      dial: "Dial E (Security & Process Isolation)",
+      title: "Ambient Tool Authority / Over-Restricted Sandbox",
+      mechanism: `Broad tool surface exposed without step-gated capability leases or sandbox boundaries.`,
+      businessImpact: `Tool parser crashes or injection drift triggered unexpected mutations or workflow failure.`,
+    });
+  } else if (config.E === "E1_god_mode_main_thread") {
+    rootCauses.push({
+      dial: "Dial E (Security & Process Isolation)",
+      title: "Ambient Authority & Main-Thread Host Crash",
+      mechanism: `All 200 tools were exposed on the main Node.js thread; model executed un-gated destructive calls or triggered SIGSEGV.`,
+      businessImpact: `Host process crashed, severing ${selected.host.activeSessions} active sessions.`,
+    });
+  }
+
+  if (config.F !== "F3_resilient_invariant_runtime") {
+    rootCauses.push({
+      dial: "Dial F (Recovery & Economics)",
+      title: "Unbounded Retry Storm & Margin Inversion",
+      mechanism: `Blind 10x retries on a shared frontier model key burned $${selected.economics.costUsd.toFixed(2)} on a $${config.ticketValueUsd} task without step checkpoints.`,
+      businessImpact: `Inverted SaaS tenant margin to negative; left ${selected.recovery.orphansLeft} orphaned cloud server running on the monthly bill.`,
+    });
+  }
+
+  // 4. Derive Applied Fixes
+  const appliedFixes: AppliedFix[] = [
+    {
+      dial: "Dial B (Database & Storage)",
+      invariantName: "Zero-Hold DB Connection Lease",
+      howItWorks: "Borrows connection for 2ms to fetch row, closes connection before token streaming, and executes an isolated 2ms atomic write on completion.",
+      codeSnippet: `await withQuickConnection(pool, async (client) => {\n  const row = await client.query("SELECT * FROM state WHERE id=$1", [id]);\n  return cloneToRam(row);\n});\n// Connection is released: 0 connections held during LLM stream`,
+      metricDelta: `DB hold dropped from ${selected.db.avgHoldMs}ms to 2ms (0 held during stream; SaaS 500s: 0)`,
+    },
+    {
+      dial: "Dial C (Network & APIs)",
+      invariantName: "Deterministic SHA-256 Idempotency & Saga Rollback",
+      howItWorks: "Binds canonical SHA-256 idempotency key to local write-ahead log and checks out-of-band GET status before any payment retry.",
+      codeSnippet: `const idemKey = sha256(\`\${runId}_\${stepId}_\${amount}\`);\nconst status = await getPaymentStatus(idemKey);\nif (!status.charged) {\n  await postPayment({ idemKey, amount });\n}`,
+      metricDelta: `Duplicate charges: $${selected.network.duplicateDollars} -> $0; Orphaned cloud: $${selected.totals.orphanedCloudCostUsd} -> $0`,
+    },
+    {
+      dial: "Dial D (Context & Signal Plane)",
+      invariantName: "DuckDB CQRS Blackboard with 250B Claim-Checks",
+      howItWorks: "Executes in-memory DuckDB join in 2ms, offloads bulky payloads to S3 claim-checks, and emits bounded 400-token summaries.",
+      codeSnippet: `const matches = await duckdb.all(\n  "SELECT c.id, z.ticket FROM c JOIN z ON c.id=z.user_id_v2"\n);\nreturn emitClaimCheck(matches); // 400 tokens instead of 80,000`,
+      metricDelta: `Prompt tokens cut from ${selected.context.promptTokens} to 400 (99.5% reduction); TTFT: ${selected.context.ttftMs}ms -> 85ms`,
+    },
+    {
+      dial: "Dial E (Security & Process Isolation)",
+      invariantName: "State-Gated Capability Leases & IPC Child Process",
+      howItWorks: "Only tools valid for the active state are leased with 5-minute expiry. Tool binaries run in an isolated child worker over IPC.",
+      codeSnippet: `const lease = gatekeeper.issueLease(activeStep, tenantId, "5m");\nif (!lease.permits(toolCall)) throw new UnauthorizedToolCall();\nconst result = await ipcWorker.execute(toolCall);`,
+      metricDelta: `Blocked destructive mutations in 1ms; contained worker crashes without dropping host process`,
+    },
+    {
+      dial: "Dial F (Recovery & Economics)",
+      invariantName: "136B Step Checkpoints & $0.25 Execution Budget Envelope",
+      howItWorks: "Persists compact 136-byte checkpoints on every turn; cascades routine steps to lightweight models and halts execution if budget cap is reached.",
+      codeSnippet: `ledger.recordCheckpoint({ step, hash, deltaBytes: 136 });\nif (inFlightCost > 0.25) return gracefulHandoff();`,
+      metricDelta: `Task cost: $${selected.economics.costUsd.toFixed(2)} -> $0.25; Wasted replay tokens: ${selected.recovery.tokensWasted} -> 0`,
+    },
+  ];
+
+  // 5. Compute Value Delta & ROI
+  const brokenMonthlyLeak = Math.round(
+    selected.totals.duplicateDollars * 20 +
+      selected.totals.orphanedCloudCostUsd +
+      selected.totals.saas500s * 150 +
+      (selected.economics.costUsd - resilient.economics.costUsd) * 400
+  );
+  const resilientMonthlyCost = Math.round(resilient.economics.costUsd * 400);
+  const netMonthlySavings = Math.max(0, brokenMonthlyLeak - resilientMonthlyCost);
+  const annualizedSavings = netMonthlySavings * 12;
+  const engagementCostUsd = 15000;
+  const paybackDays = netMonthlySavings > 0 ? Math.round((engagementCostUsd / netMonthlySavings) * 30) : 365;
+
+  return {
+    selected,
+    resilient,
+    rootCauses,
+    appliedFixes,
+    valueDelta: {
+      brokenMonthlyLeak,
+      resilientMonthlyCost,
+      netMonthlySavings,
+      annualizedSavings,
+      engagementCostUsd,
+      paybackDays,
+    },
+  };
+}

@@ -9,7 +9,8 @@
     "test": "node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "demo": "node src/demo.ts",
-    "serve": "node src/main.ts"
+    "serve": "node src/main.ts",
+    "start:matrix": "node src/main-copy.ts"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

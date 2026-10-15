@@ -8,8 +8,21 @@ import { EnterpriseChaosScenario } from "./chaos.ts";
 import { AgentContextScenario, runAgentComparison, type AgentComparisonResult } from "./agent-lab.ts";
 import { DurableScenario } from "./durable.ts";
 import { TopologyScenario, TOPOLOGY_PRESETS, type TopologyConfig } from "./topology.ts";
-import { CSP, PAGE } from "./ui.ts";
+import { CSP, PAGE } from "./ui-copy.ts";
 import { UnsupportedTraceError } from "./auditor-export.ts";
+import {
+  MatrixScenario,
+  runMatrixComparison,
+  MATRIX_PRESETS,
+  type MatrixConfig,
+  type MatrixSnapshot,
+  type DialA,
+  type DialB,
+  type DialC,
+  type DialD,
+  type DialE,
+  type DialF,
+} from "./matrix-copy.ts";
 
 export interface ServerOptions {
   host?: string; // loopback only
@@ -525,20 +538,31 @@ export async function startServer(opts: ServerOptions = {}) {
   const sendJson = (res: http.ServerResponse, status: number, obj: unknown, extra: Record<string, string> = {}) =>
     send(res, status, JSON.stringify(obj), "application/json; charset=utf-8", extra);
 
-  const readBody = (req: http.IncomingMessage): Promise<string> =>
+  let latestMatrixComparison: ReturnType<typeof runMatrixComparison> | undefined;
+  let latestMatrixScenario: MatrixScenario | undefined;
+
+  const VALID_DIAL_A = new Set(["A1_single_task", "A2_mixed_saas", "A3_exec_demo_burst", "A4_bulk_crm_swarm", "A5_marathon_30step"]);
+  const VALID_DIAL_B = new Set(["B1_zero_hold_2ms", "B2_stream_hog_30s", "B3_write_amp_15mb", "B4_hydration_freeze_4s", "B5_in_doubt_zombie_tx"]);
+  const VALID_DIAL_C = new Set(["C1_clean_20ms", "C2_socket_drop_2ms_late", "C3_rate_limit_429_brownout", "C4_bulk_50_poison_pill", "C5_legacy_erp_no_idem"]);
+  const VALID_DIAL_D = new Set(["D1_raw_json_80k_flood", "D2_append_only_quadratic", "D3_lossy_llm_summary", "D4_unmapped_schema_drift", "D5_cqrs_duckdb_blackboard_o1"]);
+  const VALID_DIAL_E = new Set(["E1_god_mode_main_thread", "E2_walled_garden_stuck", "E3_hitl_fatigue_global_bool", "E4_state_leases_ipc_worker"]);
+  const VALID_DIAL_F = new Set(["F1_blind_retry_unbounded_spend", "F2_ask_llm_to_undo", "F3_resilient_invariant_runtime"]);
+
+  const readBody = (req: http.IncomingMessage, customLimit?: number): Promise<string> =>
     new Promise((resolve, reject) => {
+      const limit = customLimit ?? maxBody;
       const declared = req.headers["content-length"];
-      if (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > maxBody)) {
-        reject(new HttpError(413, "too_large", `body over ${maxBody} bytes`));
+      if (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > limit)) {
+        reject(new HttpError(413, "too_large", `body over ${limit} bytes`));
         return;
       }
       const chunks: Buffer[] = [];
       let size = 0;
       req.on("data", (c: Buffer) => {
         size += c.length;
-        if (size > maxBody) {
+        if (size > limit) {
           req.pause();
-          reject(new HttpError(413, "too_large", `body over ${maxBody} bytes`));
+          reject(new HttpError(413, "too_large", `body over ${limit} bytes`));
           return;
         }
         chunks.push(c);
@@ -559,6 +583,111 @@ export async function startServer(opts: ServerOptions = {}) {
     if (url.pathname === "/api/state" && method === "GET") {
       if (origin !== undefined && !allowedOrigins().has(origin)) throw new HttpError(403, "bad_origin", "origin not allowed");
       return sendJson(res, 200, state());
+    }
+    if (url.pathname === "/api/matrix/presets" && method === "GET") {
+      if (origin !== undefined && !allowedOrigins().has(origin)) throw new HttpError(403, "bad_origin", "origin not allowed");
+      return sendJson(res, 200, {
+        dials: {
+          A: Array.from(VALID_DIAL_A),
+          B: Array.from(VALID_DIAL_B),
+          C: Array.from(VALID_DIAL_C),
+          D: Array.from(VALID_DIAL_D),
+          E: Array.from(VALID_DIAL_E),
+          F: Array.from(VALID_DIAL_F),
+        },
+        scale: {
+          humanUsers: { min: 0, max: 500, default: 200 },
+          concurrentAgents: { min: 1, max: 100, default: 10 },
+          dbPoolSize: { min: 2, max: 100, default: 20 },
+          workflowSteps: { min: 3, max: 30, default: 10 },
+          saasPriceUsd: { min: 5, max: 1000, default: 20 },
+          ticketValueUsd: { min: 1, max: 500, default: 5 },
+        },
+        presets: Object.entries(MATRIX_PRESETS).map(([id, p]) => ({ id, ...p })),
+      });
+    }
+    if (url.pathname === "/api/matrix/run") {
+      if (method !== "POST") throw new HttpError(405, "bad_method", "use POST");
+      if (origin === undefined || !allowedOrigins().has(origin)) throw new HttpError(403, "bad_origin", "origin not allowed");
+      if (!/^application\/json(\s*;.*)?$/i.test(req.headers["content-type"] ?? "")) throw new HttpError(415, "bad_content_type", "content-type must be application/json");
+      const raw = await readBody(req, 8192);
+      let body: unknown;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        throw new HttpError(400, "bad_json", "body is not valid JSON");
+      }
+      if (typeof body !== "object" || body === null || Array.isArray(body)) throw new HttpError(400, "bad_json", "body must be a JSON object");
+      const b = body as Record<string, unknown>;
+
+      let cfg: MatrixConfig;
+      if (typeof b.preset === "string") {
+        if (!Object.hasOwn(MATRIX_PRESETS, b.preset)) throw new HttpError(400, "bad_field", `unknown preset: ${b.preset}`);
+        cfg = structuredClone(MATRIX_PRESETS[b.preset]!);
+        if (typeof b.seed === "number") cfg.seed = b.seed;
+      } else if (typeof b.config === "object" && b.config !== null && !Array.isArray(b.config)) {
+        cfg = b.config as MatrixConfig;
+      } else {
+        cfg = b as unknown as MatrixConfig;
+      }
+
+      if (!VALID_DIAL_A.has(cfg.A)) throw new HttpError(400, "bad_field", `invalid Dial A: ${cfg.A}`);
+      if (!VALID_DIAL_B.has(cfg.B)) throw new HttpError(400, "bad_field", `invalid Dial B: ${cfg.B}`);
+      if (!VALID_DIAL_C.has(cfg.C)) throw new HttpError(400, "bad_field", `invalid Dial C: ${cfg.C}`);
+      if (!VALID_DIAL_D.has(cfg.D)) throw new HttpError(400, "bad_field", `invalid Dial D: ${cfg.D}`);
+      if (!VALID_DIAL_E.has(cfg.E)) throw new HttpError(400, "bad_field", `invalid Dial E: ${cfg.E}`);
+      if (!VALID_DIAL_F.has(cfg.F)) throw new HttpError(400, "bad_field", `invalid Dial F: ${cfg.F}`);
+
+      const result = runMatrixComparison(cfg);
+      latestMatrixComparison = result;
+      latestMatrixScenario = new MatrixScenario(cfg);
+      latestMatrixScenario.run();
+      return sendJson(res, 200, result);
+    }
+    if (url.pathname === "/api/matrix/state" && method === "GET") {
+      if (origin !== undefined && !allowedOrigins().has(origin)) throw new HttpError(403, "bad_origin", "origin not allowed");
+      const snap = latestMatrixComparison ? latestMatrixComparison.selected : (latestMatrixScenario ? latestMatrixScenario.snapshot() : null);
+      return sendJson(res, 200, snap ?? { error: "no_run", message: "no matrix simulation has been run yet" });
+    }
+    if (url.pathname === "/api/matrix/trace" && method === "GET") {
+      if (origin !== undefined && !allowedOrigins().has(origin)) throw new HttpError(403, "bad_origin", "origin not allowed");
+      if (!latestMatrixScenario) throw new HttpError(409, "no_trace", "no matrix run executed yet");
+      return sendJson(res, 200, latestMatrixScenario.exportTrace());
+    }
+    if (url.pathname === "/api/lab/run") {
+      if (method !== "POST") throw new HttpError(405, "bad_method", "use POST");
+      if (origin === undefined || !allowedOrigins().has(origin)) throw new HttpError(403, "bad_origin", "origin not allowed");
+      if (!/^application\/json(\s*;.*)?$/i.test(req.headers["content-type"] ?? "")) throw new HttpError(415, "bad_content_type", "content-type must be application/json");
+      const raw = await readBody(req, 8192);
+      let body: unknown;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        throw new HttpError(400, "bad_json", "body is not valid JSON");
+      }
+      if (typeof body !== "object" || body === null || Array.isArray(body)) throw new HttpError(400, "bad_json", "body must be a JSON object");
+      const b = body as Record<string, unknown>;
+      const scenarioType = typeof b.scenario === "string" ? b.scenario : "chaos";
+      const seed = typeof b.seed === "number" ? b.seed : 7;
+      const runId = typeof b.runId === "string" ? b.runId : `lab-${scenarioType}-${seed}`;
+
+      if (scenarioType === "chaos") {
+        const sc = new EnterpriseChaosScenario({ mode: b.mode === "resilient" ? "resilient" : "naive", seed, runId });
+        sc.start(); sc.run();
+        return sendJson(res, 200, sc.snapshot());
+      } else if (scenarioType === "agent-lab") {
+        const sc = new AgentContextScenario({ mode: b.mode === "naive" ? "naive" : "resilient", seed });
+        return sendJson(res, 200, sc.run());
+      } else if (scenarioType === "durable") {
+        const sc = new DurableScenario({ mode: b.mode === "naive" ? "naive" : "resilient", seed, runId });
+        sc.start(); sc.run();
+        return sendJson(res, 200, sc.snapshot());
+      } else if (scenarioType === "topology") {
+        const sc = new TopologyScenario({ ...TOPOLOGY_PRESETS.fullChaos, mode: b.mode === "resilient" ? "resilient" : "naive", seed, runId });
+        sc.start(); sc.run();
+        return sendJson(res, 200, sc.snapshot());
+      }
+      throw new HttpError(400, "bad_field", `unknown lab scenario: ${scenarioType}`);
     }
     if (url.pathname === "/api/topology-presets" && method === "GET") {
       if (origin !== undefined && !allowedOrigins().has(origin)) throw new HttpError(403, "bad_origin", "origin not allowed");

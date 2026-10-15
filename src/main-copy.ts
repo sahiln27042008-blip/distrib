@@ -1,4 +1,4 @@
-import { startServer } from "./server.ts";
+import { startServer } from "./server-copy.ts";
 
 const host = process.env.SIM_HOST ?? "127.0.0.1";
 const port = Number(process.env.SIM_PORT ?? 8787);
