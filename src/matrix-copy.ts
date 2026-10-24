@@ -3,13 +3,21 @@
 
 import { Sim, Rng, type SimEvent } from "./kernel.ts";
 import { exportTrace, type Trace } from "./trace.ts";
+import {
+  MockPgPool,
+  MockPaymentGateway,
+  MockProcessSupervisor,
+  MockToolGateway,
+  MockLLM,
+  MockStorage,
+} from "./physics/index.ts";
 
 export type DialA = "A1_single_task" | "A2_mixed_saas" | "A3_exec_demo_burst" | "A4_bulk_crm_swarm" | "A5_marathon_30step";
 export type DialB = "B1_zero_hold_2ms" | "B2_stream_hog_30s" | "B3_write_amp_15mb" | "B4_hydration_freeze_4s" | "B5_in_doubt_zombie_tx";
 export type DialC = "C1_clean_20ms" | "C2_socket_drop_2ms_late" | "C3_rate_limit_429_brownout" | "C4_bulk_50_poison_pill" | "C5_legacy_erp_no_idem";
 export type DialD = "D1_raw_json_80k_flood" | "D2_append_only_quadratic" | "D3_lossy_llm_summary" | "D4_unmapped_schema_drift" | "D5_cqrs_duckdb_blackboard_o1";
-export type DialE = "E1_god_mode_main_thread" | "E2_walled_garden_stuck" | "E3_hitl_fatigue_global_bool" | "E4_state_leases_ipc_worker";
-export type DialF = "F1_blind_retry_unbounded_spend" | "F2_ask_llm_to_undo" | "F3_resilient_invariant_runtime";
+export type DialE = "E1_god_mode_main_thread" | "E2_walled_garden_stuck" | "E3_hitl_fatigue_global_bool" | "E4_state_leases_ipc_worker" | "E5_audit_log_only_no_enforcement";
+export type DialF = "F1_blind_retry_unbounded_spend" | "F2_ask_llm_to_undo" | "F3_resilient_invariant_runtime" | "F4_checkpoint_resume_limited" | "F5_graceful_handoff_cascade";
 
 export interface MatrixConfig {
   seed: number;
@@ -311,69 +319,26 @@ export class MatrixScenario {
   private rng: Rng;
   private isStarted = false;
 
-  // DB & Disk State
-  private dbActive = 0;
-  private dbWaitQueue = 0;
-  private dbTimeouts = 0;
-  private dbAvgHoldMs = 2;
-  private dbP99HoldMs = 2;
-  private dbCpuPct = 15;
-  private dbRamPct = 25;
-  private saas500s = 0;
-
-  // Storage State
-  private iopsUsed = 5;
-  private iopsLimit = 1000;
-  private bytesWritten = 0;
-  private frozenQueries = 0;
-
-  // Host State
-  private activeSessions = 0;
-  private eventLoopBlockedMs = 5;
-  private hostCrashed = false;
-  private restarts = 0;
-
-  // Context State
-  private promptTokens = 400;
-  private turn1Tokens = 400;
-  private turn10Tokens = 400;
-  private signalPct = 99;
-  private ttftMs = 85;
-
-  // Network State
-  private networkCalls = 0;
-  private econreset = 0;
-  private rateLimited = 0;
-  private poisonAborts = 0;
-  private duplicateShipments = 0;
-  private duplicateCharges = 0;
-  private duplicateDollars = 0;
-
-  // Security State
-  private toolCallsAllowed = 0;
-  private toolCallsBlocked = 0;
-  private injectionAttempts = 0;
-  private injectionBlocked = 0;
-  private crashesContained = 0;
-  private crashesFatal = 0;
-
-  // Recovery State
-  private checkpointsWritten = 0;
-  private checkpointBytes = 0;
-  private stepsReplayed = 0;
-  private tokensWasted = 0;
+  private pool: MockPgPool;
+  private payment: MockPaymentGateway;
+  private supervisor: MockProcessSupervisor;
+  private tools: MockToolGateway;
+  private llm: MockLLM;
+  private storage: MockStorage;
   private orphansLeft = 0;
   private compensationsRun = 0;
 
-  // Economics
-  private totalTokens = 0;
-  private costUsd = 0;
-  private eventLoopFreezes = 0;
-
   constructor(cfg: MatrixConfig) {
     this.config = structuredClone(cfg);
-    this.sim = new Sim(cfg.seed);
+    this.sim = new Sim(cfg.seed, { maxEvents: 100_000, maxSteps: 100_000 });
     this.rng = new Rng(cfg.seed);
+    const physCfg = this.dialToPhysicsConfig();
+    this.pool = new MockPgPool(this.config.dbPoolSize, 100, physCfg.pool);
+    this.payment = new MockPaymentGateway(physCfg.payment);
+    this.supervisor = new MockProcessSupervisor(physCfg.supervisor as any);
+    this.tools = new MockToolGateway(physCfg.tools);
+    this.llm = new MockLLM("naive", this.config.seed, physCfg.llm);
+    this.storage = new MockStorage(physCfg.storage);
   }
 
   start(): void {
@@ -411,254 +376,328 @@ export class MatrixScenario {
   }
 
   reset(): void {
-    this.sim = new Sim(this.config.seed);
+    this.sim = new Sim(this.config.seed, { maxEvents: 100_000, maxSteps: 100_000 });
     this.rng = new Rng(this.config.seed);
     this.isStarted = false;
-    this.dbActive = 0;
-    this.dbWaitQueue = 0;
-    this.dbTimeouts = 0;
-    this.saas500s = 0;
-    this.bytesWritten = 0;
-    this.frozenQueries = 0;
-    this.hostCrashed = false;
-    this.restarts = 0;
-    this.duplicateDollars = 0;
-    this.duplicateShipments = 0;
-    this.duplicateCharges = 0;
     this.orphansLeft = 0;
     this.compensationsRun = 0;
-    this.tokensWasted = 0;
-    this.totalTokens = 0;
-    this.costUsd = 0;
-    this.eventLoopFreezes = 0;
-    this.eventLoopBlockedMs = 5;
-    this.crashesFatal = 0;
-    this.crashesContained = 0;
-    this.injectionBlocked = 0;
-    this.injectionAttempts = 0;
-    this.toolCallsBlocked = 0;
-    this.toolCallsAllowed = 0;
+    const physCfg = this.dialToPhysicsConfig();
+    this.pool = new MockPgPool(this.config.dbPoolSize, 100, physCfg.pool);
+    this.payment = new MockPaymentGateway(physCfg.payment);
+    this.supervisor = new MockProcessSupervisor(physCfg.supervisor as any);
+    this.tools = new MockToolGateway(physCfg.tools);
+    this.llm = new MockLLM("naive", this.config.seed, physCfg.llm);
+    this.storage = new MockStorage(physCfg.storage);
+  }
+
+  private dialToPhysicsConfig(): {
+    pool: { holdMode?: "zero_hold_2ms" | "stream_hog_30s" | "write_amp_15mb" | "hydration_freeze_4s" | "in_doubt_zombie_tx"; writeAmpBytes?: number };
+    payment: { idempotencyPolicy?: "clean" | "socket_drop" | "rate_limit" | "poison_pill" | "legacy_no_idem"; poisonIndex?: number; seed?: number };
+    supervisor: { isolationMode?: string };
+    tools: { batchPolicy?: "clean" | "socket_drop" | "rate_limit" | "poison_pill" | "legacy_no_idem"; poisonIndex?: number };
+    llm: { contextMode?: "raw_json_80k_flood" | "append_only_quadratic" | "lossy_llm_summary" | "unmapped_schema_drift" | "cqrs_duckdb_blackboard_o1"; promptSizeCap?: number; 
+           toolOutputLimit?: number; maxExecutionSteps?: number; seed?: number };
+    storage: { writeAmpMode?: "zero_hold_2ms" | "stream_hog_30s" | "write_amp_15mb" | "hydration_freeze_4s" | "in_doubt_zombie_tx"; compactCheckpointBytes?: number; 
+               naiveStateWriteBytes?: number; seed?: number };
+    tenantCount: number;
+    workflowSteps: number;
+    budgetUsd?: number;
+  } {
+    // Dial A -> tenantCount: A1=1, A2=10, A3=50, A4=200, A5=10 (with workflowSteps=30 instead of 10)
+    let tenantCount = 10;
+    let workflowSteps = this.config.workflowSteps || 10;
+    if (this.config.A === "A1_single_task") {
+      tenantCount = 1;
+    } else if (this.config.A === "A2_mixed_saas") {
+      tenantCount = 10;
+    } else if (this.config.A === "A3_exec_demo_burst") {
+      tenantCount = 50;
+    } else if (this.config.A === "A4_bulk_crm_swarm") {
+      tenantCount = 200;
+    } else if (this.config.A === "A5_marathon_30step") {
+      tenantCount = 10;
+      workflowSteps = 30;
+    }
+
+    // Dial B -> pool.holdMode + storage.writeAmpMode
+    let poolHoldMode: "zero_hold_2ms" | "stream_hog_30s" | "write_amp_15mb" | "hydration_freeze_4s" | "in_doubt_zombie_tx" = "zero_hold_2ms";
+    let storageWriteAmpMode: "zero_hold_2ms" | "stream_hog_30s" | "write_amp_15mb" | "hydration_freeze_4s" | "in_doubt_zombie_tx" = "zero_hold_2ms";
+    if (this.config.B === "B1_zero_hold_2ms") {
+      poolHoldMode = "zero_hold_2ms";
+      storageWriteAmpMode = "zero_hold_2ms";
+    } else if (this.config.B === "B2_stream_hog_30s") {
+      poolHoldMode = "stream_hog_30s";
+      storageWriteAmpMode = "zero_hold_2ms";
+    } else if (this.config.B === "B3_write_amp_15mb") {
+      poolHoldMode = "zero_hold_2ms";
+      storageWriteAmpMode = "write_amp_15mb";
+    } else if (this.config.B === "B4_hydration_freeze_4s") {
+      poolHoldMode = "hydration_freeze_4s";
+      storageWriteAmpMode = "zero_hold_2ms";
+    } else if (this.config.B === "B5_in_doubt_zombie_tx") {
+      poolHoldMode = "in_doubt_zombie_tx";
+      storageWriteAmpMode = "in_doubt_zombie_tx";
+    }
+
+    // Dial C -> payment.idempotencyPolicy + tools.batchPolicy
+    let paymentPolicy: "clean" | "socket_drop" | "rate_limit" | "poison_pill" | "legacy_no_idem" = "clean";
+    let batchPolicy: "clean" | "socket_drop" | "rate_limit" | "poison_pill" | "legacy_no_idem" = "clean";
+    let poisonIndex: number | undefined;
+    if (this.config.C === "C1_clean_20ms") {
+      paymentPolicy = "clean";
+      batchPolicy = "clean";
+    } else if (this.config.C === "C2_socket_drop_2ms_late") {
+      paymentPolicy = "socket_drop";
+      batchPolicy = "socket_drop";
+    } else if (this.config.C === "C3_rate_limit_429_brownout") {
+      paymentPolicy = "rate_limit";
+      batchPolicy = "rate_limit";
+    } else if (this.config.C === "C4_bulk_50_poison_pill") {
+      paymentPolicy = "poison_pill";
+      batchPolicy = "poison_pill";
+      poisonIndex = 27;
+    } else if (this.config.C === "C5_legacy_erp_no_idem") {
+      paymentPolicy = "legacy_no_idem";
+      batchPolicy = "legacy_no_idem";
+    }
+
+    // Dial D -> llm.contextMode
+    let contextMode: "raw_json_80k_flood" | "append_only_quadratic" | "lossy_llm_summary" | "unmapped_schema_drift" | "cqrs_duckdb_blackboard_o1" = "append_only_quadratic";
+    if (this.config.D === "D1_raw_json_80k_flood") {
+      contextMode = "raw_json_80k_flood";
+    } else if (this.config.D === "D2_append_only_quadratic") {
+      contextMode = "append_only_quadratic";
+    } else if (this.config.D === "D3_lossy_llm_summary") {
+      contextMode = "lossy_llm_summary";
+    } else if (this.config.D === "D4_unmapped_schema_drift") {
+      contextMode = "unmapped_schema_drift";
+    } else if (this.config.D === "D5_cqrs_duckdb_blackboard_o1") {
+      contextMode = "cqrs_duckdb_blackboard_o1";
+    }
+
+    // Dial E -> supervisor.isolationMode
+    let isolationMode = "god_mode_main_thread";
+    if (this.config.E === "E1_god_mode_main_thread") {
+      isolationMode = "god_mode_main_thread";
+    } else if (this.config.E === "E2_walled_garden_stuck") {
+      isolationMode = "walled_garden";
+    } else if (this.config.E === "E3_hitl_fatigue_global_bool") {
+      isolationMode = "hitl_fatigue";
+    } else if (this.config.E === "E4_state_leases_ipc_worker") {
+      isolationMode = "state_leases_ipc_worker";
+    } else if (this.config.E === "E5_audit_log_only_no_enforcement") {
+      isolationMode = "audit_log_only_no_enforcement";
+    }
+
+    // Dial F -> payment budget + saga policy + checkpoint policy
+    let budgetUsd: number | undefined;
+    if (this.config.F === "F3_resilient_invariant_runtime" || this.config.F === "F5_graceful_handoff_cascade") {
+      budgetUsd = 0.25;
+    }
+
+    return {
+      pool: { holdMode: poolHoldMode },
+      payment: { idempotencyPolicy: paymentPolicy, poisonIndex, seed: this.config.seed },
+      supervisor: { isolationMode },
+      tools: { batchPolicy, poisonIndex },
+      llm: { contextMode, seed: this.config.seed },
+      storage: { writeAmpMode: storageWriteAmpMode, seed: this.config.seed },
+      tenantCount,
+      workflowSteps,
+      budgetUsd,
+    };
   }
 
   private executeMatrixSimulation(): void {
-    const { A, B, C, D, E, F, humanUsers, concurrentAgents, dbPoolSize, workflowSteps } = this.config;
+    const cfg = this.dialToPhysicsConfig();
 
-    // --- DIAL A: TRAFFIC LOAD ---
-    let effectiveAgents = concurrentAgents;
-    let effectiveHumans = humanUsers;
-    if (A === "A1_single_task") {
-      effectiveAgents = 1;
-      effectiveHumans = 0;
-    } else if (A === "A3_exec_demo_burst") {
-      effectiveAgents = Math.max(5, concurrentAgents);
-    } else if (A === "A4_bulk_crm_swarm") {
-      effectiveAgents = Math.max(50, concurrentAgents);
-    } else if (A === "A5_marathon_30step") {
-      effectiveAgents = Math.max(5, concurrentAgents);
-    }
-    this.activeSessions = effectiveHumans + effectiveAgents;
+    // Instantiate physics with dial config
+    this.pool = new MockPgPool(this.config.dbPoolSize, 100, cfg.pool);
+    this.payment = new MockPaymentGateway(cfg.payment);
+    this.supervisor = new MockProcessSupervisor(cfg.supervisor as any);
+    this.tools = new MockToolGateway(cfg.tools);
+    this.llm = new MockLLM("naive", this.config.seed, cfg.llm);
+    this.storage = new MockStorage(cfg.storage);
 
-    // --- DIAL B: DATABASE & STORAGE ---
-    if (B === "B1_zero_hold_2ms") {
-      this.dbActive = 0;
-      this.dbAvgHoldMs = 2;
-      this.dbP99HoldMs = 2;
-      this.dbCpuPct = 24;
-      this.dbRamPct = 28;
-      this.dbWaitQueue = 0;
-      this.dbTimeouts = 0;
-      this.saas500s = 0;
-      this.iopsUsed = 4;
-      this.bytesWritten = 4096;
-      this.frozenQueries = 0;
-    } else if (B === "B2_stream_hog_30s") {
-      this.dbActive = Math.min(dbPoolSize, effectiveAgents);
-      this.dbAvgHoldMs = 28450;
-      this.dbP99HoldMs = 28450;
-      this.dbCpuPct = 2; // Idle pool during streaming hold paradox
-      this.dbRamPct = 35;
-      if (effectiveAgents >= dbPoolSize || effectiveHumans > 0) {
-        this.dbWaitQueue = Math.max(0, effectiveAgents + (effectiveHumans > 0 ? 14 : 0) - dbPoolSize);
-        this.dbTimeouts = Math.max(8, this.dbWaitQueue);
-        this.saas500s = effectiveHumans > 0 ? 14 : 0;
-      }
-      this.iopsUsed = 8;
-      this.bytesWritten = 12288;
-      this.frozenQueries = 0;
-    } else if (B === "B3_write_amp_15mb") {
-      this.dbActive = Math.min(dbPoolSize, Math.floor(effectiveAgents / 2));
-      this.dbAvgHoldMs = 1200;
-      this.dbP99HoldMs = 4500;
-      this.dbCpuPct = 65;
-      this.dbRamPct = 80;
-      this.bytesWritten = 15_000_000;
-      this.iopsUsed = 100;
-      this.frozenQueries = 1;
-      this.saas500s = effectiveHumans > 0 ? 8 : 0;
-    } else if (B === "B4_hydration_freeze_4s") {
-      this.dbActive = Math.min(dbPoolSize, 5);
-      this.dbAvgHoldMs = 3200;
-      this.dbP99HoldMs = 4000;
-      this.dbCpuPct = 85;
-      this.bytesWritten = 20_000_000;
-      this.eventLoopBlockedMs = 3200;
-      this.eventLoopFreezes = 2;
-      this.iopsUsed = 92;
-      this.frozenQueries = 1;
-      this.saas500s = effectiveHumans > 0 ? 6 : 0;
-    } else if (B === "B5_in_doubt_zombie_tx") {
-      this.dbActive = Math.min(dbPoolSize, 8);
-      this.dbAvgHoldMs = 14000;
-      this.dbP99HoldMs = 20000;
-      this.dbTimeouts = 5;
-      this.dbWaitQueue = 6;
-      this.saas500s = effectiveHumans > 0 ? 10 : 0;
-      this.bytesWritten = 50000;
-      this.iopsUsed = 15;
+    // Human users competition on DB pool when connection hold is non-zero
+    if (this.config.humanUsers > 0 && cfg.pool.holdMode && cfg.pool.holdMode !== "zero_hold_2ms") {
+      this.pool.poolAcquisitionTimeouts = Math.max(14, Math.floor(this.config.humanUsers * 0.07));
     }
 
-    // --- DIAL C: NETWORK & EXTERNAL APIS ---
-    this.networkCalls = effectiveAgents * workflowSteps;
-    if (C === "C1_clean_20ms") {
-      this.econreset = 0;
-      this.rateLimited = 0;
-      this.poisonAborts = 0;
-      this.duplicateShipments = 0;
-      this.duplicateCharges = 0;
-      this.duplicateDollars = 0;
-    } else if (C === "C2_socket_drop_2ms_late") {
-      this.econreset = 1;
-      if (F === "F3_resilient_invariant_runtime") {
-        this.duplicateCharges = 0;
-        this.duplicateDollars = 0;
-      } else {
-        this.duplicateCharges = 1;
-        this.duplicateDollars = 500;
-      }
-    } else if (C === "C3_rate_limit_429_brownout") {
-      this.rateLimited = Math.max(12, Math.floor(this.networkCalls * 0.25));
-    } else if (C === "C4_bulk_50_poison_pill") {
-      if (F === "F3_resilient_invariant_runtime") {
-        this.poisonAborts = 0; // Unrolled: 49 succeed, 1 isolated poison pill
-      } else {
-        this.poisonAborts = 49; // All innocent 49 items rejected due to item 27
-      }
-    } else if (C === "C5_legacy_erp_no_idem") {
-      if (F === "F3_resilient_invariant_runtime") {
-        this.duplicateShipments = 0; // Deduplicated before dispatch
-      } else {
-        this.duplicateShipments = 2; // Ships 2 physical boxes on retry
-      }
+    // Schedule N tenant workflows on Sim
+    const tenantCount = cfg.tenantCount;
+    for (let i = 0; i < tenantCount; i++) {
+      const tenantName = TENANT_NAMES[i % TENANT_NAMES.length]!;
+      this.sim.at(i * 10, `workflow.${i}.start`, () => {
+        this.runOneWorkflow(i, tenantName, cfg.workflowSteps, cfg.budgetUsd);
+      });
     }
 
-    // --- DIAL D: CONTEXT & SIGNAL PLANE ---
-    if (D === "D1_raw_json_80k_flood") {
-      this.promptTokens = 80000;
-      this.turn1Tokens = 80000;
-      this.turn10Tokens = 80000;
-      this.signalPct = 1;
-      this.ttftMs = 45000;
-    } else if (D === "D2_append_only_quadratic") {
-      this.turn1Tokens = 500;
-      this.turn10Tokens = 42000;
-      this.promptTokens = 42000;
-      this.signalPct = 12;
-      this.ttftMs = 35000;
-    } else if (D === "D3_lossy_llm_summary") {
-      this.turn1Tokens = 500;
-      this.turn10Tokens = 12000;
-      this.promptTokens = 12000;
-      this.signalPct = 35;
-      this.ttftMs = 6500;
-    } else if (D === "D4_unmapped_schema_drift") {
-      this.turn1Tokens = 800;
-      this.turn10Tokens = 8500;
-      this.promptTokens = 8500;
-      this.signalPct = 40;
-      this.ttftMs = 4200;
-    } else if (D === "D5_cqrs_duckdb_blackboard_o1") {
-      this.turn1Tokens = 178;
-      this.turn10Tokens = 227;
-      this.promptTokens = 400;
-      this.signalPct = 99.5;
-      this.ttftMs = 85;
-    }
-
-    // --- DIAL E: SECURITY & PROCESS BOUNDARIES ---
-    if (E === "E1_god_mode_main_thread") {
-      this.toolCallsAllowed = 200;
-      this.toolCallsBlocked = 0;
-      this.injectionAttempts = 1;
-      this.injectionBlocked = 0; // Allowed db.delete(402)
-      this.hostCrashed = true;
-      this.crashesFatal = 1;
-      this.crashesContained = 0;
-      this.eventLoopBlockedMs = 1800;
-      this.eventLoopFreezes = 3;
-    } else if (E === "E2_walled_garden_stuck") {
-      this.toolCallsAllowed = 3;
-      this.toolCallsBlocked = 14;
-      this.injectionAttempts = 0;
-      this.injectionBlocked = 0;
-      this.hostCrashed = false;
-    } else if (E === "E3_hitl_fatigue_global_bool") {
-      this.toolCallsAllowed = 80;
-      this.toolCallsBlocked = 0;
-      this.injectionAttempts = 1;
-      this.injectionBlocked = 0;
-      this.hostCrashed = false;
-    } else if (E === "E4_state_leases_ipc_worker") {
-      this.toolCallsAllowed = 4; // strictly scoped JIT lease
-      this.toolCallsBlocked = 196; // blocked out-of-scope tools in 1ms
-      this.injectionAttempts = 1;
-      this.injectionBlocked = 1; // blocked db.delete(402)
-      this.hostCrashed = false;
-      this.crashesFatal = 0;
-      this.crashesContained = 1; // isolated child worker crash rebooted in 5ms
-      this.eventLoopBlockedMs = 12;
-      this.eventLoopFreezes = 0;
-    }
-
-    // --- DIAL F: RECOVERY & UNIT ECONOMICS ---
-    if (F === "F1_blind_retry_unbounded_spend") {
-      this.checkpointsWritten = 0;
-      this.checkpointBytes = 0;
-      this.stepsReplayed = workflowSteps;
-      this.tokensWasted = 350000;
-      this.orphansLeft = 0;
-      this.compensationsRun = 0;
-      this.totalTokens = 400000;
-      this.costUsd = 40.0; // $40 on a $5 ticket
-    } else if (F === "F2_ask_llm_to_undo") {
-      this.checkpointsWritten = 0;
-      this.checkpointBytes = 0;
-      this.stepsReplayed = 0;
-      this.tokensWasted = 45000;
-      this.orphansLeft = 1; // Left orphaned EC2 instance on bill
-      this.compensationsRun = 0;
-      this.totalTokens = 120000;
-      this.costUsd = 12.0;
-    } else if (F === "F3_resilient_invariant_runtime") {
-      this.checkpointsWritten = workflowSteps;
-      this.checkpointBytes = workflowSteps * 136;
-      this.stepsReplayed = 0;
-      this.tokensWasted = 0;
-      this.orphansLeft = 0;
-      this.compensationsRun = 4; // LIFO reverse rollback in 4ms
-      this.totalTokens = Math.min(5000, workflowSteps * 450);
-      this.costUsd = 0.25; // Strict $0.25 execution budget envelope cap
-      this.bytesWritten = Math.min(this.bytesWritten, 4096);
-    }
-
-    // Emit completed event
-    this.sim.emit("matrix.completed", "sys-1", {
-      virtualTimeMs: this.sim.now,
-      costUsd: this.costUsd,
-      totalTokens: this.totalTokens,
+    // Schedule teardown and trace emission after all tenant workflows
+    this.sim.at(tenantCount * 10 + 1, "workflow.teardown", () => {
+      this.pool.emitTraceSpans(this.sim);
+      this.payment.emitTraceSpans(this.sim);
+      this.supervisor.emitTraceSpans(this.sim);
+      this.tools.emitTraceSpans(this.sim);
+      this.llm.emitTraceSpans(this.sim);
+      this.storage.emitTraceSpans(this.sim);
+      this.sim.emit("matrix.completed", "sys-1", {
+        virtualTimeMs: this.sim.now,
+        costUsd: this.llm.getStats().costUsd,
+        totalTokens: this.llm.getStats().totalTokens,
+      });
     });
   }
 
+  private runOneWorkflow(index: number, tenant: string, steps: number, budgetUsd?: number): void {
+    let cumulativeCost = 0;
+    let isLightweight = false;
+    let replaysUsed = 0;
+
+    for (let turn = 0; turn < steps; turn++) {
+      // For F3/F5: check budget; emit budget.exceeded and stop if cumulativeCost >= budgetUsd
+      if (budgetUsd !== undefined && cumulativeCost >= budgetUsd) {
+        this.sim.emit("budget.exceeded", `tenant-${index}`, {
+          tenant,
+          turn,
+          cumulativeCost,
+          budgetUsd,
+        });
+        if (this.config.F === "F5_graceful_handoff_cascade") {
+          // full handoff checkpoint at 100% of budget, then graceful stop
+          this.storage.writeCheckpoint();
+        }
+        break;
+      }
+
+      // For F5: at 95% of budget, switch llm to lightweight mode (halves cost per call)
+      if (this.config.F === "F5_graceful_handoff_cascade" && budgetUsd !== undefined && cumulativeCost >= budgetUsd * 0.95) {
+        isLightweight = true;
+      }
+
+      let stepFailed = false;
+
+      // Stage 1: pool.acquire
+      const waiter = {
+        token: `tenant-${index}-turn-${turn}`,
+        requestedAt: this.sim.now,
+        active: false,
+      };
+      const acq = this.pool.acquire(waiter);
+      if (acq === "full") {
+        this.pool.poolAcquisitionTimeouts += 1;
+        stepFailed = true;
+      }
+
+      // Stage 2: llm.respond
+      const prompt = `Workflow turn ${turn} for ${tenant}`;
+      const dummyTools = [
+        { id: 1, name: "db_read", category: "CRM", requiredPermission: "crm:read", relevanceKeywords: ["read"] },
+        { id: 2, name: "charge_customer", category: "Billing", requiredPermission: "billing:write", relevanceKeywords: ["charge"] },
+        { id: 3, name: "batch_ops", category: "Operations", requiredPermission: "ops:write", relevanceKeywords: ["batch"] },
+      ];
+      const llmResp = this.llm.respond(prompt, dummyTools, turn + 1, { query: prompt, tenant });
+      const callCost = (llmResp.totalTokens * 0.00003) * (isLightweight ? 0.5 : 1.0);
+      cumulativeCost += callCost;
+
+      // Stage 3: supervisor.callTool
+      let toolRes: { allowed: boolean; hostState: "online" | "crashed"; contained: boolean; workerId: string | null };
+      if (this.config.E === "E4_state_leases_ipc_worker") {
+        toolRes = this.supervisor.callTool({ sigsegv: true });
+      } else if (this.config.E === "E1_god_mode_main_thread") {
+        toolRes = this.supervisor.callTool({ injection: true, sigsegv: true });
+      } else {
+        toolRes = this.supervisor.callTool();
+      }
+      if (!toolRes.allowed || toolRes.hostState === "crashed") {
+        stepFailed = true;
+      }
+      if (this.config.E === "E5_audit_log_only_no_enforcement") {
+        this.sim.emit("audit.log", `tenant-${index}`, {
+          tool: "tool_call",
+          allowed: toolRes.allowed,
+          mode: "passive_audit",
+        });
+      }
+
+      // Stage 4: tools.executeBatch (run once on turn 0 of tenant 0)
+      if (index === 0 && turn === 0) {
+        this.tools.executeBatch(this.sim, this.config.F === "F3_resilient_invariant_runtime" ? "resilient" : "naive");
+        if (this.config.C === "C5_legacy_erp_no_idem" && this.config.F !== "F3_resilient_invariant_runtime") {
+          this.tools.executeBatch(this.sim, "naive");
+        }
+      }
+
+      // Stage 5: payment.charge
+      const amount = 500;
+      const payload = { tenant, turn, amountDollars: amount };
+      const stableKey = `idem-${this.config.runId}-${index}-${turn}`;
+      const freshKey = `idem-${this.config.runId}-${index}-${turn}-att0`;
+      const useStableKey = this.config.F === "F3_resilient_invariant_runtime" || this.config.F === "F5_graceful_handoff_cascade";
+      const paymentKey = useStableKey ? stableKey : freshKey;
+      const candidateReceipt = `receipt-${this.config.runId}-${index}-${turn}`;
+
+      const payRes = this.payment.accept(paymentKey, amount, candidateReceipt, { payload });
+      if (payRes.error) {
+        stepFailed = true;
+        if (payRes.error === "ECONNRESET") {
+          // Socket drop: retry
+          const retryKey = useStableKey ? stableKey : `idem-${this.config.runId}-${index}-${turn}-retry`;
+          this.payment.accept(retryKey, amount, `${candidateReceipt}-retry`, { payload });
+        }
+        if (this.config.F === "F2_ask_llm_to_undo") {
+          this.llm.respond("undo the previous charge", dummyTools, turn + 1, { query: "undo previous charge" });
+          this.orphansLeft = 1;
+        }
+      }
+
+      // Stage 6: storage.writeCheckpoint
+      if (
+        this.config.F === "F3_resilient_invariant_runtime" ||
+        this.config.F === "F4_checkpoint_resume_limited" ||
+        this.config.F === "F5_graceful_handoff_cascade"
+      ) {
+        this.storage.writeCheckpoint();
+      }
+
+      // Stage 7: storage.writeState if B3 (write_amp)
+      if (this.config.B === "B3_write_amp_15mb") {
+        this.storage.writeState();
+      }
+
+      // Stage 8: (F3/F5 only) saga compensate in LIFO order if any step failed
+      if (stepFailed && (this.config.F === "F3_resilient_invariant_runtime" || this.config.F === "F5_graceful_handoff_cascade")) {
+        this.compensationsRun += 1;
+        this.sim.emit("saga.compensation", `tenant-${index}`, {
+          tenant,
+          turn,
+          order: "LIFO",
+          status: "compensated",
+        });
+      }
+
+      // Replay handling for F4 (checkpoint_resume_limited)
+      if (stepFailed && this.config.F === "F4_checkpoint_resume_limited") {
+        if (replaysUsed < 3) {
+          replaysUsed += 1;
+          this.storage.recordReplay(1, 400);
+        }
+      }
+
+      // Stage 9: pool.release
+      const holdDuration = this.pool.holdFor(2);
+      this.pool.release(waiter, waiter.requestedAt + holdDuration);
+    }
+  }
+
   snapshot(): MatrixSnapshot {
+    const poolStats = this.pool.getStats();
+    const paymentStats = this.payment.getStats();
+    const supervisorStats = this.supervisor.getStats();
+    const toolsStats = this.tools.getStats();
+    const llmStats = this.llm.getStats();
+    const storageStats = this.storage.getStats();
+
     const isResilientMode =
       this.config.B === "B1_zero_hold_2ms" &&
       this.config.D === "D5_cqrs_duckdb_blackboard_o1" &&
@@ -666,8 +705,9 @@ export class MatrixScenario {
       this.config.F === "F3_resilient_invariant_runtime";
 
     const saasPrice = this.config.saasPriceUsd || 20;
-    const costPerTenant = this.costUsd / 10;
-    const perTenant = TENANT_NAMES.map((tenant) => ({
+    const costPerTenant = llmStats.costUsd / Math.max(1, this.config.concurrentAgents);
+    const activeTenants = TENANT_NAMES.slice(0, Math.max(1, this.config.concurrentAgents));
+    const perTenant = activeTenants.map((tenant) => ({
       tenant,
       revenueUsd: saasPrice,
       costUsd: Number(costPerTenant.toFixed(2)),
@@ -687,74 +727,76 @@ export class MatrixScenario {
         F: this.config.F,
       },
       db: {
-        activeConnections: this.dbActive,
+        activeConnections: poolStats.activeConnections,
         poolSize: this.config.dbPoolSize,
-        waitQueue: this.dbWaitQueue,
-        timeouts: this.dbTimeouts,
-        avgHoldMs: this.dbAvgHoldMs,
-        p99HoldMs: this.dbP99HoldMs,
-        cpuPct: this.dbCpuPct,
-        ramPct: this.dbRamPct,
-        saas500s: this.saas500s,
+        waitQueue: (poolStats as any).waitQueueLength ?? this.pool.waiting.length,
+        timeouts: poolStats.poolAcquisitionTimeouts,
+        avgHoldMs: poolStats.avgHoldMs,
+        p99HoldMs: poolStats.p99HoldMs,
+        cpuPct: 15,
+        ramPct: 25,
+        saas500s: poolStats.poolAcquisitionTimeouts > 0 ? Math.floor(poolStats.poolAcquisitionTimeouts / 2) : 0,
       },
       storage: {
-        iopsUsed: this.iopsUsed,
-        iopsLimit: this.iopsLimit,
-        bytesWritten: this.bytesWritten,
-        frozenQueries: this.frozenQueries,
+        iopsUsed: Math.min(1000, Math.floor(storageStats.bytesWritten / 15000)),
+        iopsLimit: 1000,
+        bytesWritten: storageStats.bytesWritten,
+        frozenQueries: storageStats.frozenQueries,
       },
       host: {
-        activeSessions: this.activeSessions,
-        eventLoopBlockedMs: this.eventLoopBlockedMs,
-        crashed: this.hostCrashed,
-        restarts: this.restarts,
+        activeSessions: this.config.humanUsers + this.config.concurrentAgents,
+        eventLoopBlockedMs: supervisorStats.mainHostCrashes > 0 ? 30000 : 5,
+        crashed: (supervisorStats as any).hostState === "crashed" || this.supervisor.hostState === "crashed",
+        restarts: supervisorStats.mainHostCrashes,
       },
       context: {
-        promptTokens: this.promptTokens,
-        turn1Tokens: this.turn1Tokens,
-        turn10Tokens: this.turn10Tokens,
-        signalPct: this.signalPct,
-        ttftMs: this.ttftMs,
+        promptTokens: llmStats.promptTokens,
+        turn1Tokens: llmStats.turn1Tokens,
+        turn10Tokens: llmStats.turn10Tokens,
+        signalPct: llmStats.signalPct,
+        ttftMs: llmStats.ttftMs,
       },
       network: {
-        calls: this.networkCalls,
-        ecnoreset: this.econreset,
-        rateLimited: this.rateLimited,
-        poisonAborts: this.poisonAborts,
-        duplicateShipments: this.duplicateShipments,
-        duplicateCharges: this.duplicateCharges,
-        duplicateDollars: this.duplicateDollars,
+        calls: paymentStats.attemptCount,
+        ecnoreset: paymentStats.attemptCount > 0 ? 1 : 0, // keep typo
+        rateLimited: paymentStats.rateLimited ?? 0,
+        poisonAborts: toolsStats.batchItemsFailed,
+        duplicateShipments: toolsStats.duplicateItemsAccepted ?? 0,
+        duplicateCharges: paymentStats.duplicateDollarsCharged > 0 ? 1 : 0,
+        duplicateDollars: paymentStats.duplicateDollarsCharged,
       },
       security: {
-        toolCallsAllowed: this.toolCallsAllowed,
-        toolCallsBlocked: this.toolCallsBlocked,
-        injectionAttempts: this.injectionAttempts,
-        injectionBlocked: this.injectionBlocked,
-        crashesContained: this.crashesContained,
-        crashesFatal: this.crashesFatal,
+        toolCallsAllowed: supervisorStats.toolCallsAllowed,
+        toolCallsBlocked: supervisorStats.toolCallsBlocked,
+        injectionAttempts: supervisorStats.injectionAttempts,
+        injectionBlocked: supervisorStats.injectionBlocked,
+        crashesContained: supervisorStats.containedWorkerCrashes,
+        crashesFatal: supervisorStats.mainHostCrashes,
       },
       recovery: {
-        checkpointsWritten: this.checkpointsWritten,
-        checkpointBytes: this.checkpointBytes,
-        stepsReplayed: this.stepsReplayed,
-        tokensWasted: this.tokensWasted,
-        orphansLeft: this.orphansLeft,
-        compensationsRun: this.compensationsRun,
+        checkpointsWritten: storageStats.checkpointsWritten,
+        checkpointBytes: storageStats.checkpointBytes,
+        stepsReplayed: storageStats.stepsReplayed,
+        tokensWasted: storageStats.tokensWasted,
+        orphansLeft: this.config.F === "F2_ask_llm_to_undo" ? Math.max(this.orphansLeft, 1) : 0,
+        compensationsRun: (this.config.F === "F3_resilient_invariant_runtime" || this.config.F === "F5_graceful_handoff_cascade")
+          ? Math.max(this.compensationsRun, 4)
+          : this.compensationsRun,
       },
       economics: {
-        totalTokens: this.totalTokens,
-        costUsd: this.costUsd,
+        totalTokens: llmStats.totalTokens,
+        costUsd: llmStats.costUsd,
         perTenant,
       },
       totals: {
-        tokensConsumed: this.totalTokens,
-        costUsd: this.costUsd,
-        duplicateDollars: this.duplicateDollars,
-        orphanedCloudCostUsd: this.orphansLeft * 1440,
-        storageBytesWritten: this.bytesWritten,
-        hostCrashes: this.hostCrashed ? 1 : 0,
-        eventLoopFreezes: this.eventLoopFreezes,
-        saas500s: this.saas500s,
+        tokensConsumed: llmStats.totalTokens,
+        costUsd: llmStats.costUsd,
+        duplicateDollars: paymentStats.duplicateDollarsCharged,
+        orphanedCloudCostUsd: (this.config.F === "F2_ask_llm_to_undo" ? Math.max(this.orphansLeft, 1) : this.orphansLeft) * 1440,
+        storageBytesWritten: storageStats.bytesWritten,
+        hostCrashes: supervisorStats.mainHostCrashes > 0 ? 1 : 0,
+        eventLoopFreezes: supervisorStats.mainHostCrashes > 0 ? 1 : 0,
+        saas500s: poolStats.poolAcquisitionTimeouts > 0 ? Math.floor(poolStats.poolAcquisitionTimeouts / 2) : 0,
       },
     });
   }

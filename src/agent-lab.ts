@@ -1,4 +1,7 @@
-import { MockPgPool } from "./chaos.ts";
+import { MockPgPool } from "./physics/mock-pg-pool.ts";
+import { MockLLM } from "./physics/mock-llm.ts";
+
+export { MockLLM };
 
 export type AgentMode = "naive" | "resilient";
 export const COST_PER_TOKEN = 0.00003;
@@ -268,65 +271,6 @@ function buildToolRegistry(): ToolDefinition[] {
     }
   }
   return tools;
-}
-
-function makeLargeNarrative(seed: number, turn: number, query: string): string {
-  const repeated = [
-    `Turn ${turn}: ${query}`,
-    `Seed ${seed} produced a deterministic support trace with a verified contract review, stable billing state, and a matching account audit.`,
-    "The enterprise issue is isolated to an expired entitlement cache, a stale order status, and a failed downstream sync. The root cause remains consistent across every check.",
-    "Support reviewed the customer record, contract, payment timeline, shipping state, and the product incident history to confirm the same issue signature before remediation.",
-    "The remediation path is safe because the workflow only reads the service state, confirms the contract, and applies a bounded state reset with explicit validation after every step.",
-    "This issue was caused by a stale entitlement cache and failed synchronization, not by a payment or shipping failure. The record set and the incident timeline agree on that diagnosis.",
-    "The final verification checks the customer status, order state, and service-state output before closing the case. The evidence remains deterministic across runs for this seed.",
-    "This is a synthetic enterprise support scenario created for deterministic benchmarking and agent-context comparison. The data is intentionally stable and repeatable across runs.",
-  ];
-  const fragments: string[] = [];
-  for (let index = 0; index < 12; index++) {
-    fragments.push(repeated.join(" "));
-  }
-  return fragments.join("\n");
-}
-
-export class MockLLM {
-  readonly mode: AgentMode;
-  readonly seed: number;
-
-  constructor(mode: AgentMode, seed: number) {
-    this.mode = mode;
-    this.seed = seed;
-  }
-
-  respond(prompt: string, tools: ToolDefinition[], turn: number, scenarioState: Record<string, unknown>): {
-    response: string;
-    toolCalls: Array<{ toolId: number; name: string; permission: string; args: Record<string, string> }>;
-    inputTokens: number;
-    outputTokens: number;
-    totalTokens: number;
-    hallucinationCount: number;
-  } {
-    const responseBase = makeLargeNarrative(this.seed, turn, String(scenarioState.query ?? "support issue"));
-    const response = this.mode === "naive"
-      ? responseBase
-      : `I reviewed the support state and resolved the issue with the approved workflow. Evidence: ${String(scenarioState.workflowStep ?? "customer support")}.`;
-
-    const toolCalls = tools.slice(0, this.mode === "naive" ? Math.min(tools.length, 18) : Math.min(tools.length, 5)).map((tool, index) => ({
-      toolId: tool.id,
-      name: tool.name,
-      permission: tool.requiredPermission,
-      args: {
-        query: String(scenarioState.query ?? "customer support issue"),
-        turn: String(turn),
-        index: String(index),
-        mode: this.mode,
-      },
-    }));
-
-    const hallucinationCount = this.mode === "naive" && ((this.seed + turn * 7) % 5 === 0 || (this.seed + turn * 11) % 5 === 2) ? 1 : 0;
-    const inputTokens = estimateTokens(prompt);
-    const outputTokens = estimateTokens(response);
-    return { response, toolCalls, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, hallucinationCount };
-  }
 }
 
 export class AgentContextScenario {

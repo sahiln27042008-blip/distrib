@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { Sim, type SimEvent } from "./kernel.ts";
 import type { Trace } from "./trace.ts";
+import { MockPgPool } from "./physics/mock-pg-pool.ts";
+import { MockPaymentGateway } from "./physics/mock-payment-gateway.ts";
+import { MockProcessSupervisor } from "./physics/mock-process-supervisor.ts";
+import { MockToolGateway } from "./physics/mock-tool-gateway.ts";
 
 export type ChaosMode = "naive" | "resilient";
 export type ChaosWorkflowStatus = "queued" | "running" | "completed" | "completed_with_item_failures" | "compensated" | "failed" | "host_unavailable";
@@ -119,107 +123,6 @@ export interface ChaosSnapshot {
 
 interface Waiter { token: string; workflow: ChaosWorkflow; requestedAt: number; acquiredAt?: number; active: boolean }
 
-export class MockPgPool {
-  readonly capacity: number;
-  readonly queueCapacity: number;
-  activeConnections = 0;
-  peakActiveConnections = 0;
-  poolAcquisitionTimeouts = 0;
-  totalHoldMs = 0;
-  readonly waiting: Waiter[] = [];
-  readonly active = new Map<string, Waiter>();
-
-  constructor(capacity: number, queueCapacity: number) {
-    this.capacity = capacity;
-    this.queueCapacity = queueCapacity;
-  }
-
-  acquire(waiter: Waiter): "acquired" | "queued" | "full" {
-    if (this.activeConnections < this.capacity) {
-      this.activate(waiter);
-      return "acquired";
-    }
-    if (this.waiting.length >= this.queueCapacity) return "full";
-    this.waiting.push(waiter);
-    return "queued";
-  }
-
-  activate(waiter: Waiter, now: number = waiter.requestedAt): void {
-    waiter.active = true;
-    waiter.acquiredAt = now;
-    this.active.set(waiter.token, waiter);
-    this.activeConnections += 1;
-    this.peakActiveConnections = Math.max(this.peakActiveConnections, this.activeConnections);
-  }
-
-  removeWaiting(waiter: Waiter): boolean {
-    const index = this.waiting.indexOf(waiter);
-    if (index < 0) return false;
-    this.waiting.splice(index, 1);
-    return true;
-  }
-
-  release(waiter: Waiter, now: number): number {
-    if (!this.active.delete(waiter.token)) return 0;
-    waiter.active = false;
-    this.activeConnections -= 1;
-    const heldMs = now - (waiter.acquiredAt ?? waiter.requestedAt);
-    this.totalHoldMs += heldMs;
-    return heldMs;
-  }
-}
-
-export class MockPaymentGateway {
-  readonly receipts = new Map<string, { receiptId: string; amountDollars: number }>();
-
-  accept(key: string, amountDollars: number, candidateReceiptId: string): { receiptId: string; replayed: boolean } {
-    const prior = this.receipts.get(key);
-    if (prior) return { receiptId: prior.receiptId, replayed: true };
-    this.receipts.set(key, { receiptId: candidateReceiptId, amountDollars });
-    return { receiptId: candidateReceiptId, replayed: false };
-  }
-
-  reset(): void {
-    this.receipts.clear();
-  }
-}
-
-export class MockProcessSupervisor {
-  hostState: "online" | "crashed" = "online";
-  workerState: "idle" | "busy" | "crashed" = "idle";
-  mainHostCrashes = 0;
-  containedWorkerCrashes = 0;
-
-  failNative(mode: ChaosMode): { hostState: "online" | "crashed"; workerId: string; contained: boolean } {
-    if (mode === "naive") {
-      this.hostState = "crashed";
-      this.mainHostCrashes += 1;
-      return { hostState: this.hostState, workerId: "main-host", contained: false };
-    }
-    this.workerState = "busy";
-    this.workerState = "crashed";
-    this.containedWorkerCrashes += 1;
-    return { hostState: this.hostState, workerId: "native-worker-1", contained: true };
-  }
-
-  reset(): void {
-    this.hostState = "online";
-    this.workerState = "idle";
-    this.mainHostCrashes = 0;
-    this.containedWorkerCrashes = 0;
-  }
-}
-
-export class MockToolGateway {
-  readonly totalItems = 50;
-  readonly poisonItem = 27;
-  readonly malformedUtf8 = Buffer.from([0xc3, 0x28]);
-
-  validatesPoison(): boolean {
-    return this.malformedUtf8.toString("utf8").includes("\uFFFD");
-  }
-}
-
 function canonical(value: unknown): string {
   if (value === null || value === undefined) return "null";
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -235,7 +138,7 @@ export function paymentIdempotencyKey(runId: string, stepId: string, payload: Re
 export class EnterpriseChaosScenario {
   readonly cfg: ChaosConfig;
   sim: Sim;
-  pool: MockPgPool;
+  pool: MockPgPool<Waiter>;
   life: ChaosSnapshot["life"] = "idle";
   error?: string;
   private workflows = new Map<string, ChaosWorkflow>();
