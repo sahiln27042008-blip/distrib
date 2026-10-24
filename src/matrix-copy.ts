@@ -634,15 +634,18 @@ export class MatrixScenario {
       const stableKey = `idem-${this.config.runId}-${index}-${turn}`;
       const freshKey = `idem-${this.config.runId}-${index}-${turn}-att0`;
       const useStableKey = this.config.F === "F3_resilient_invariant_runtime" || this.config.F === "F5_graceful_handoff_cascade";
-      const paymentKey = useStableKey ? stableKey : freshKey;
+      const hasIdempotency = this.payment.policy !== "legacy_no_idem";
+      const paymentKey = hasIdempotency ? (useStableKey ? stableKey : freshKey) : null;
       const candidateReceipt = `receipt-${this.config.runId}-${index}-${turn}`;
 
       const payRes = this.payment.accept(paymentKey, amount, candidateReceipt, { payload });
       if (payRes.error) {
         stepFailed = true;
-        if (payRes.error === "ECONNRESET") {
+        if (payRes.error === "ECONNRESET" && (hasIdempotency || this.config.F !== "F3_resilient_invariant_runtime")) {
           // Socket drop: retry
-          const retryKey = useStableKey ? stableKey : `idem-${this.config.runId}-${index}-${turn}-retry`;
+          const retryKey = hasIdempotency
+            ? (useStableKey ? stableKey : `idem-${this.config.runId}-${index}-${turn}-retry`)
+            : null;
           this.payment.accept(retryKey, amount, `${candidateReceipt}-retry`, { payload });
         }
         if (this.config.F === "F2_ask_llm_to_undo") {
@@ -802,7 +805,14 @@ export class MatrixScenario {
   }
 
   exportTrace(): { schema: "sim-trace/0"; simulated: true; virtualTime: true; traceId: string; spans: unknown[]; derived: unknown } {
-    return exportTrace(this.sim.log, `matrix-${this.config.runId}-${this.config.seed}`, { snapshot: this.snapshot() });
+    const trace = exportTrace(this.sim.log, `matrix-${this.config.runId}-${this.config.seed}`, { snapshot: this.snapshot() });
+    for (const span of trace.spans) {
+      const retryLink = span.links.find((link) => link.type === "retry_of");
+      if (retryLink && typeof span.attrs.attempt_of === "string") {
+        span.attrs.attempt_of = retryLink.spanId;
+      }
+    }
+    return trace;
   }
 }
 

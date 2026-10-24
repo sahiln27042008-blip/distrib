@@ -144,7 +144,7 @@ export class MockPaymentGateway {
     if (prevCharges > 0) this.stats.duplicateDollarsCharged += amountDollars;
     this.chargesByBody.set(bodyHash, prevCharges + 1);
 
-    if (policy === "socket_drop" && !this.dropped.has(bodyHash)) {
+    if ((policy === "socket_drop" || policy === "legacy_no_idem") && !this.dropped.has(bodyHash)) {
       // Gateway accepted the charge, but the connection dies before the client sees the response.
       this.dropped.add(bodyHash);
       rec.outcome = "conn_reset";
