@@ -243,7 +243,6 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
         jsonrpc: "2.0",
         id: reqId,
         result,
-        ...result, // Flatten at top level for convenient inspection
       }));
     };
 
