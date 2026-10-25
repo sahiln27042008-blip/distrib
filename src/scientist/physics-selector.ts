@@ -116,7 +116,7 @@ function actorsForDescription(
   const text = description.toLowerCase();
   const aliases: Record<string, string[]> = {
     agent: ["agent", "assistant"],
-    database: ["database", "postgres", "postgresql", "mysql", "clickhouse", "replication", "eventual consistency"],
+    database: ["database", "postgres", "postgresql", "mysql", "clickhouse", "replication", "eventual consistency", "data store"],
     payment_service: ["payment", "stripe", "charge", "billing"],
     process_supervisor: ["supervisor", "process isolation"],
     tool_gateway: ["tool", "mcp", "batch"],
@@ -128,15 +128,44 @@ function actorsForDescription(
       .filter(([, terms]) => terms.some((term) => text.includes(term)))
       .map(([kind]) => kind),
   );
-  const inferred: Array<{ kind: string; name: string }> = [];
+  const inferred: Array<{ kind: string; name: string; contract?: { guarantees: string[] } }> = [];
   const add = (kind: string, name: string, terms: string[]) => {
     if (terms.some((term) => text.includes(term)) && !actors.some((actor) => actor.kind === kind)) inferred.push({ kind, name });
   };
-  add("queue", "Message Queue", ["queue", "kafka", "sqs", "pub/sub", "at-least-once"]);
+  add("queue", "Message Queue", ["queue", "kafka", "sqs", "pub/sub", "at-least-once", "message system", "messaging", "asynchronous message"]);
   add("worker", "Worker", ["worker", "background job", "job runner"]);
   add("external_api", "External API", ["external api", "third-party api", "third party api"]);
-  add("database", "Distributed Database", ["distributed database", "eventual consistency", "replication lag", "replicated database"]);
+  add("database", "Distributed Database", ["distributed database", "distributed data store", "eventual consistency", "replication lag", "replicated database"]);
   const inferredKinds = new Set(inferred.map((actor) => actor.kind));
-  const describedActors = actors.filter((actor) => describedKinds.has(actor.kind) || inferredKinds.has(actor.kind));
+  const describedActors = actors
+    .filter((actor) => describedKinds.has(actor.kind) || inferredKinds.has(actor.kind))
+    .map((actor) => ({ ...actor }));
+
+  if (["distributed database", "distributed data store", "eventual consistency", "replication lag", "replicated database"].some((term) => text.includes(term))) {
+    const dbActor = describedActors.find((actor) => actor.kind === "database") ?? inferred.find((actor) => actor.kind === "database");
+    if (dbActor) {
+      dbActor.name = "Distributed Database";
+      dbActor.contract = {
+        actorKind: "database",
+        guarantees: ["Eventual consistency across replicas"],
+        possibleBehaviors: dbActor.contract?.possibleBehaviors ?? [],
+        failureModes: dbActor.contract?.failureModes ?? [],
+      };
+    } else {
+      inferred.push({
+        kind: "database",
+        name: "Distributed Database",
+        contract: {
+          actorKind: "database",
+          guarantees: ["Eventual consistency across replicas"],
+          possibleBehaviors: [],
+          failureModes: [],
+        },
+      });
+    }
+  }
+
   return [...describedActors, ...inferred.filter((actor) => !describedActors.some((existing) => existing.kind === actor.kind))];
 }
+
+

@@ -57,7 +57,9 @@ export function interventionsToConfig(
     }
   }
 
-  config.runId = `experiment-${Date.now()}`;
+  config.runId = baseConfig.runId?.startsWith("adaptive-")
+    ? baseConfig.runId
+    : `experiment-${baseConfig.seed ?? 0}`;
   return config;
 }
 
