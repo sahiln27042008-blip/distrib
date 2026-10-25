@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { MatrixScenario, type MatrixConfig } from "../../matrix-copy.ts";
 import { exportChaosLangChainJsonl } from "../../chaos-auditor-adapter.ts";
 import type { Trace } from "../../trace.ts";
+import { verifyPatch } from "../../verification/patch-verifier.ts";
+import type { CodePatch } from "../../repair/patch-types.ts";
 
 export interface ToolContext {
   sessionId?: string;
@@ -147,11 +149,32 @@ export const verifyFixTool: McpTool = {
         type: "string",
         description: "The rule_id of the finding to verify (e.g., 'r04-network-idempotency')",
       },
+      patch: {
+        type: "object",
+        description: "CodePatch to verify with dial-equivalent config and business impact proof",
+      },
     },
     required: ["originalConfig", "fixedConfig", "findingRuleId"],
   },
   async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
     const originalConfig = args.originalConfig as MatrixConfig;
+    const patch = args.patch as CodePatch | undefined;
+
+    if (patch) {
+      if (!originalConfig || !isValidConfig(originalConfig)) {
+        return { success: false, error: "originalConfig with valid dials A-F is required" };
+      }
+      try {
+        const verification = await verifyPatch(patch, originalConfig);
+        return {
+          success: true,
+          ...verification,
+        };
+      } catch (err: any) {
+        return { success: false, error: `Execution error during verify_fix: ${err.message || String(err)}` };
+      }
+    }
+
     const fixedConfig = args.fixedConfig as MatrixConfig;
     const findingRuleId = args.findingRuleId as string;
 

@@ -1,6 +1,8 @@
 import { createOrchestrator } from "../../llm/meta-client.ts";
 import { PROPOSE_FIX_PROMPT } from "../../llm/prompts.ts";
 import type { MatrixConfig, DialA, DialB, DialC, DialD, DialE, DialF } from "../../matrix-copy.ts";
+import { generatePatch } from "../../repair/patch-generator.ts";
+import type { CodePatch } from "../../repair/patch-types.ts";
 
 export interface ToolContext {
   sessionId?: string;
@@ -280,10 +282,26 @@ export const proposeFixTool: McpTool = {
 
     const changedDials = getChangedDials(originalConfig, merged);
 
+    let patch: CodePatch | undefined;
+    if (finding && explanation) {
+      try {
+        patch = await generatePatch(
+          finding as any,
+          explanation,
+          originalConfig,
+          systemDescription,
+          orchestrator,
+        );
+      } catch {
+        // Fallback: ignore error to avoid breaking tool
+      }
+    }
+
     return {
       success: true,
       fixedConfig: merged,
       changedDials,
+      ...(patch ? { patch } : {}),
     };
   },
 };
