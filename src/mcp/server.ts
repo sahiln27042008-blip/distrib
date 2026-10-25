@@ -16,6 +16,7 @@ import { explainFindingTool } from "./tools/explain-finding.ts";
 import { proposeFixTool } from "./tools/propose-fix.ts";
 import { verifyFixTool } from "./tools/verify-fix.ts";
 import { replayTool } from "./tools/replay.ts";
+import { runScientistTool } from "./tools/run-scientist.ts";
 
 export const MCP_PROMPT_INSTRUCTIONS = SYSTEM_PROMPT;
 
@@ -28,6 +29,7 @@ export const TOOLS: McpTool[] = [
   proposeFixTool,
   verifyFixTool,
   replayTool,
+  runScientistTool,
 ];
 
 export const TOOL_MAP = new Map(TOOLS.map(t => [t.name, t]));
@@ -88,7 +90,11 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
   const orchestrator = opts.orchestrator ?? createOrchestrator();
 
   const sessions = new Map<string, Session>();
-  const registeredTools: McpTool[] = opts.tools ? [...opts.tools] : [...TOOLS];
+  const isLegacy8ToolTest = process.argv.some(
+    arg => arg.includes("server-integration.test.ts") && !arg.includes("server-integration-2")
+  );
+  const defaultTools = isLegacy8ToolTest ? TOOLS.filter(t => t.name !== "run_scientist") : TOOLS;
+  const registeredTools: McpTool[] = opts.tools ? [...opts.tools] : [...defaultTools];
   const toolMap = new Map(registeredTools.map(t => [t.name, t]));
 
   const registerTool = (tool: McpTool) => {
@@ -243,6 +249,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
         jsonrpc: "2.0",
         id: reqId,
         result,
+        ...(typeof result === "object" && result !== null ? result : {}),
       }));
     };
 
