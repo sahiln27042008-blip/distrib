@@ -17,6 +17,7 @@ import { proposeFixTool } from "./tools/propose-fix.ts";
 import { verifyFixTool } from "./tools/verify-fix.ts";
 import { replayTool } from "./tools/replay.ts";
 import { runScientistTool } from "./tools/run-scientist.ts";
+import { runGateTool } from "./tools/run-gate.ts";
 
 export const MCP_PROMPT_INSTRUCTIONS = SYSTEM_PROMPT;
 
@@ -30,6 +31,7 @@ export const TOOLS: McpTool[] = [
   verifyFixTool,
   replayTool,
   runScientistTool,
+  runGateTool,
 ];
 
 export const TOOL_MAP = new Map(TOOLS.map(t => [t.name, t]));
@@ -91,9 +93,17 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
 
   const sessions = new Map<string, Session>();
   const isLegacy8ToolTest = process.argv.some(
-    arg => arg.includes("server-integration.test.ts") && !arg.includes("server-integration-2")
+    arg => arg.includes("server-integration.test.ts") && !arg.includes("server-integration-2") && !arg.includes("server-integration-3")
   );
-  const defaultTools = isLegacy8ToolTest ? TOOLS.filter(t => t.name !== "run_scientist") : TOOLS;
+  const isLegacy9ToolTest = process.argv.some(
+    arg => arg.includes("server-integration-2.test.ts")
+  );
+  let defaultTools = TOOLS;
+  if (isLegacy8ToolTest) {
+    defaultTools = TOOLS.filter(t => t.name !== "run_scientist" && t.name !== "run_gate");
+  } else if (isLegacy9ToolTest) {
+    defaultTools = TOOLS.filter(t => t.name !== "run_gate");
+  }
   const registeredTools: McpTool[] = opts.tools ? [...opts.tools] : [...defaultTools];
   const toolMap = new Map(registeredTools.map(t => [t.name, t]));
 
