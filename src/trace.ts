@@ -8,7 +8,7 @@ export interface Span {
   name: string;
   startMs: number; // virtual ms
   endMs: number;
-  status: "ok" | "timeout" | "unfinished";
+  status: "ok" | "timeout" | "unfinished" | "error";
   attrs: Record<string, unknown>;
   links: Array<{ type: "retry_of"; spanId: string }>;
   events: Array<{ t: number; name: string; attrs: Record<string, unknown> }>;
@@ -60,14 +60,15 @@ export function exportTrace(events: SimEvent[], traceId: string, derived: Record
       const end = mine.find((x) => x.kind === "payment.response.received" || x.kind === "client.timeout");
       const late = mine.find((x) => x.kind === "payment.response.late_ignored");
       const server = mine.find((x) => x.kind === "payment.refund.created" || x.kind === "payment.idempotent_replay");
-      const { retryOf, ...rest } = e.data as { retryOf?: string };
+      const { retryOf, ...rest } = e.data as Record<string, unknown> & { retryOf?: string };
+      const accepted = rest.outcome === "accepted" || rest.outcome === "replayed" || rest.outcome === "conn_reset";
       const span: Span = {
         ...base,
         parentSpanId: rootId,
         name: "payment.attempt",
         startMs: e.t,
         endMs: end ? end.t : e.t,
-        status: !end ? "unfinished" : end.kind === "client.timeout" ? "timeout" : "ok",
+        status: accepted ? "ok" : !end ? "unfinished" : end.kind === "client.timeout" ? "timeout" : "ok",
         attrs: {
           ...rest,
           ...(server ? { serverProcessedAtMs: server.t, serverResult: server.kind, refundId: server.data.refundId } : {}),
@@ -76,10 +77,40 @@ export function exportTrace(events: SimEvent[], traceId: string, derived: Record
       };
       if (typeof retryOf === "string") span.links.push({ type: "retry_of", spanId: sid(retryOf) });
       spans.push(span);
+    } else if (e.kind === "storage_write") {
+      spans.push({
+        ...base,
+        parentSpanId: rootId,
+        name: "db.write",
+        startMs: e.t,
+        endMs: e.t,
+        status: "ok",
+        attrs: { ...e.data, step_type: "storage_write" },
+      });
+    } else if (e.kind === "saga.compensation") {
+      spans.push({
+        ...base,
+        parentSpanId: rootId,
+        name: "saga.compensation",
+        startMs: e.t,
+        endMs: e.t,
+        status: typeof e.data.error === "string" ? "error" : "ok",
+        attrs: { ...e.data },
+      });
     } else if (e.kind === "db.write") {
       const a = attemptOf(e);
       spans.push({ ...base, parentSpanId: a ? sid(a.id) : rootId, name: `db.${String(e.data.table)}.${String(e.data.op)}`, startMs: e.t, endMs: e.t, status: "ok", attrs: { ...e.data } });
     }
   }
+
+  for (const event of events) {
+    if (event.kind !== "saga.compensation" || typeof event.data.compensation_for_body_hash !== "string") continue;
+    for (const span of spans) {
+      if (span.name !== "payment.attempt" || span.attrs.body_hash !== event.data.compensation_for_body_hash) continue;
+      if (typeof event.data.saga_id === "string") span.attrs.saga_id = event.data.saga_id;
+      span.attrs.compensation_required = true;
+    }
+  }
+
   return { schema: "sim-trace/0", simulated: true, virtualTime: true, traceId, spans, derived };
 }

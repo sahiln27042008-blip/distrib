@@ -1,0 +1,27 @@
+{
+  "case_id": "cfo-workflow-churn-remediation",
+  "workflow_description": "CFO agent queries Postgres for high-value ($25k+) churned customers, cross-references Zendesk tickets and GitHub issues for the bugs that caused churn, grants a one-month-free credit in Stripe, sends a personalized apology email via SendGrid, and alerts the dev team in Slack.",
+  "actors": [
+    "cfo-agent",
+    "postgres",
+    "zendesk",
+    "github",
+    "stripe",
+    "sendgrid",
+    "slack"
+  ],
+  "state_substrates": [
+    { "id": "cell-postgres-churn", "kind": "CELL", "persistence": "DURABLE" },
+    { "id": "cell-stripe-credit", "kind": "CELL", "persistence": "DURABLE" },
+    { "id": "lease-postgres-pool", "kind": "LEASE", "maxCapacity": 20 }
+  ],
+  "channels": [
+    "channel-cfo-postgres",
+    "channel-cfo-zendesk",
+    "channel-cfo-github",
+    "channel-cfo-stripe",
+    "channel-cfo-sendgrid",
+    "channel-cfo-slack"
+  ]
+}
+

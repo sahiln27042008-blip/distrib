@@ -1,0 +1,31 @@
+{
+  "case_id": "cloudflare-2025-11-18",
+  "historical_incident": "Cloudflare Global Outage / Bot Management Feature Update",
+  "date": "2025-11-18",
+  "primary_source": "Cloudflare Official Incident Postmortem (November 18, 2025 canonical case)",
+  "incident_summary": "Cloudflare experienced a global outage across numerous data centers when an update to the Bot Management feature dataset caused the core proxy daemon to crash globally, leading to 502/503 errors for web traffic.",
+  "root_cause": {
+    "mechanism": "ClickHouse metadata query emitted duplicate feature records due to uncompleted background merges in ReplacingMergeTree. The feature generation script did not deduplicate records and generated a feature file with duplicate entries. The edge proxy had an internal fixed-size array limit for features. When edge proxies downloaded and parsed the feature file, the number of features exceeded the array bounds, causing an unhandled panic/crash in the core proxy daemon on the main thread.",
+    "trigger": "ClickHouse table partition merge timing resulted in duplicate rows returned by the feature generator query.",
+    "vulnerability": "Hardcoded maximum feature capacity limit in the edge proxy without upstream validation, canary rollout, or process isolation."
+  },
+  "actual_causal_sequence": [
+    "Step 1: Background merges in ClickHouse ReplacingMergeTree had not completed for recent partitions.",
+    "Step 2: Scheduled feature generation job queried ClickHouse without FINAL or explicit deduplication.",
+    "Step 3: Query returned duplicate rows for certain feature definitions.",
+    "Step 4: Feature generator serialized the duplicate rows into the production bot management feature file.",
+    "Step 5: Feature file was published to Quicksilver and propagated globally within seconds.",
+    "Step 6: Edge proxy daemon parsed the feature file into memory.",
+    "Step 7: Duplicate feature entries caused total entry count to exceed the proxy's bounded array limit.",
+    "Step 8: Buffer overflow / array bounds violation caused the core proxy process (FL) to panic and terminate.",
+    "Step 9: Customer web requests routed through affected edge servers received 502/503 errors."
+  ],
+  "impact": "Global service degradation and 502/503 Bad Gateway errors across dozens of edge data centers.",
+  "remediation": [
+    "Emergency rollback of the malformed feature file in Quicksilver.",
+    "Updated feature extraction query with explicit deduplication logic to ignore unmerged duplicates.",
+    "Added automated schema and bounds validation checks prior to publishing files to Quicksilver.",
+    "Modified edge proxy parser to fail gracefully (reject invalid config and keep existing rules) rather than crashing the proxy daemon."
+  ]
+}
+

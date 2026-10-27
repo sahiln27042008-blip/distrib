@@ -1,0 +1,78 @@
+{
+  "case_id": "cloudflare-2025-11-18",
+  "phase": "PREDICTION",
+  "prediction_frozen_timestamp": "2026-10-26T01:21:00Z",
+  "configured_dials": {
+    "A": "A4_bulk_crm_swarm",
+    "B": "B5_in_doubt_zombie_tx",
+    "C": "C1_clean_20ms",
+    "D": "D4_unmapped_schema_drift",
+    "E": "E1_god_mode_main_thread",
+    "F": "F1_blind_retry_unbounded_spend"
+  },
+  "selected_physics": [
+    "worker.state_loss",
+    "tool.partial_success",
+    "db.hold_and_write_amp"
+  ],
+  "physics_selection_reasons": [
+    {
+      "primitiveId": "worker.state_loss",
+      "relevance": 0.82,
+      "reason": "Worker restart can lose volatile state and replay side effects."
+    },
+    {
+      "primitiveId": "tool.partial_success",
+      "relevance": 0.75,
+      "reason": "A tool batch can partially succeed and leave uncertain state."
+    },
+    {
+      "primitiveId": "db.hold_and_write_amp",
+      "relevance": 0.7,
+      "reason": "Database connection pressure and write amplification affect reliability."
+    }
+  ],
+  "physics_coverage": {
+    "required_physical_mechanisms": 7,
+    "representable_physical_mechanisms": 3,
+    "unrepresented_mechanisms": 4,
+    "coverage_pct": 42.86,
+    "unrepresented_details": [
+      "bounded_resource_consumer_with_hard_capacity_limit",
+      "instant_global_replication_bus",
+      "in_memory_array_overflow_corruption",
+      "distributed_dedup_query_semantics"
+    ]
+  },
+  "experiment_budget": 100,
+  "experiments_run": 0,
+  "classification": "INSUFFICIENT_PHYSICS",
+  "predicted_failure": null,
+  "counterexample": null,
+  "insufficient_physics": [
+    {
+      "description": "Bounded resource consumer with a hard capacity limit",
+      "reason": "No registered primitive models the stated hard capacity bound on edge proxy consumers.",
+      "evidence": [
+        "Architecture description mentions a bounded consumer or hard capacity limit (in-memory limits: Allocates bounded internal memory structures and fixed-size rule/feature arrays sized according to documented maximum feature capacities)."
+      ],
+      "proposed": "proposed.bounded_resource_consumer_with_a_hard_capacity_lim"
+    },
+    {
+      "description": "Distributed database eventual consistency semantics",
+      "reason": "The architecture describes replication or eventual consistency, but the corresponding consistency primitive was not selected or cannot simulate asynchronous background deduplication merges.",
+      "evidence": [
+        "The ReplacingMergeTree engine deduplicates records with matching sorting keys asynchronously during background part merges. Queries without explicit aggregation or FINAL read unmerged parts and may observe duplicate rows."
+      ],
+      "proposed": "proposed.distributed_database_eventual_consistency_semantic"
+    }
+  ],
+  "false_positives": [],
+  "discovery_source": "RULES",
+  "deterministic_replay": {
+    "seed": 42,
+    "byte_identical": true,
+    "serialized_bytes": 1414
+  }
+}
+

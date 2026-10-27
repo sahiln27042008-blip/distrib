@@ -3,6 +3,7 @@
 
 import { Sim, Rng, type SimEvent } from "./kernel.ts";
 import { exportTrace, type Trace } from "./trace.ts";
+import { paymentBodyHash } from "./physics/mock-payment-gateway.ts";
 import {
   MockPgPool,
   MockPaymentGateway,
@@ -651,6 +652,12 @@ export class MatrixScenario {
         if (this.config.F === "F2_ask_llm_to_undo") {
           this.llm.respond("undo the previous charge", dummyTools, turn + 1, { query: "undo previous charge" });
           this.orphansLeft = 1;
+          this.sim.emit("saga.compensation", `tenant-${index}`, {
+            saga_id: `saga-${index}-${turn}`,
+            compensation_for_body_hash: paymentBodyHash(payload),
+            compensation_missing: true,
+            error: "LLM undo did not execute a compensating payment",
+          });
         }
       }
 

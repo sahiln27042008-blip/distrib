@@ -43,26 +43,6 @@ function resolveAuditor(): AuditorModule {
   throw new Error(`Auditor dist entry not found at ${distEntry}`);
 }
 
-function checkDialFailure(cfg: MatrixConfig, ruleId: string): boolean {
-  const r = (ruleId || "").toLowerCase();
-  if (r.includes("r04") || r.includes("idempotency")) {
-    return (
-      (cfg.C === "C5_legacy_erp_no_idem" || cfg.C === "C2_socket_drop_2ms_late") &&
-      (cfg.F === "F1_blind_retry_unbounded_spend" || cfg.F !== "F3_resilient_invariant_runtime")
-    );
-  }
-  if (r.includes("r11") || r.includes("compaction") || r.includes("write")) {
-    return cfg.B === "B3_write_amp_15mb";
-  }
-  if (r.includes("r05") || r.includes("saga")) {
-    return cfg.F === "F2_ask_llm_to_undo";
-  }
-  if (r.includes("r10") || r.includes("economic")) {
-    return cfg.D === "D1_raw_json_80k_flood" && cfg.F === "F1_blind_retry_unbounded_spend";
-  }
-  return false;
-}
-
 function matchesFinding(f: Finding, ruleId: string): boolean {
   if (f.status !== "proven") return false;
   const fId = (f.rule_id || "").toLowerCase();
@@ -122,44 +102,41 @@ export async function verifyPatch(
   const fixedInternal = auditor.parseLangChainCallbackJsonl(fixedJsonl);
   let fixedFindings = auditor.auditTrace(fixedInternal);
 
-  // Synthesize findings for known matrix dial failure modes if needed
-  let originalMatching = originalFindings.filter((f) => matchesFinding(f, patch.ruleId));
-  let fixedMatching = fixedFindings.filter((f) => matchesFinding(f, patch.ruleId));
-
-  if (originalMatching.length === 0 && checkDialFailure(originalConfig, patch.ruleId)) {
-    originalMatching = [
-      {
-        rule_id: patch.ruleId,
-        pillar: "matrix-failure-mode",
-        status: "proven",
-        severity: "critical",
-        message: `Proven failure under dial configuration for ${patch.ruleId}`,
-        evidence: { span_ids: [originalTrace.spans?.[0]?.spanId || "span-root"] },
-        repro: `Run matrix with ${patch.ruleId} failure dials`,
-        suggested_fix: "Apply resilient dials",
-      },
-    ];
-  }
-
-  if (fixedMatching.length === 0 && checkDialFailure(fixedConfig, patch.ruleId)) {
-    fixedMatching = [
-      {
-        rule_id: patch.ruleId,
-        pillar: "matrix-failure-mode",
-        status: "proven",
-        severity: "critical",
-        message: `Proven failure under dial configuration for ${patch.ruleId}`,
-        evidence: { span_ids: [fixedTrace.spans?.[0]?.spanId || "span-root"] },
-        repro: `Run matrix with ${patch.ruleId} failure dials`,
-        suggested_fix: "Apply resilient dials",
-      },
-    ];
-  }
-
-  const isFixed = originalMatching.length > 0 && fixedMatching.length === 0;
+  // Real matching findings only (NO synthesis)
+  const originalMatching = originalFindings.filter((f) => matchesFinding(f, patch.ruleId));
+  const fixedMatching = fixedFindings.filter((f) => matchesFinding(f, patch.ruleId));
 
   const beforeImpact = formatImpact(originalSnapshot);
   const afterImpact = formatImpact(fixedSnapshot);
+
+  // If the auditor returns 0 proven findings for both original and fixed configs
+  if (originalMatching.length === 0 && fixedMatching.length === 0) {
+    return {
+      patchId: patch.id,
+      originalConfig,
+      fixedConfig,
+      findingRuleId: patch.ruleId,
+      beforeFindings: 0,
+      afterFindings: 0,
+      beforeBusinessImpact: beforeImpact,
+      afterBusinessImpact: afterImpact,
+      isFixed: false,
+      proof: "NO_REAL_FINDING: auditor produced no proven findings for either config",
+      replayHandle: {
+        seed: fixedConfig.seed,
+        config: fixedConfig,
+      },
+    };
+  }
+
+  // A patch can ONLY be declared isFixed: true if:
+  // 1. The auditor returned >= 1 real proven finding on the original config, AND
+  // 2. The auditor returned 0 proven findings on the fixed config, AND
+  // 3. Both runs used the same seed.
+  const isFixed =
+    originalMatching.length >= 1 &&
+    fixedMatching.length === 0 &&
+    originalConfig.seed === fixedConfig.seed;
 
   const proof = isFixed
     ? `Original had ${originalMatching.length} proven ${patch.ruleId} finding(s). ${beforeImpact}. After applying patch (${patch.description}), fixed config has ${fixedMatching.length} findings. ${afterImpact}. Fix verified.`

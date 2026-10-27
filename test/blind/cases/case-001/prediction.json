@@ -1,0 +1,49 @@
+{
+  "case_id": "case-001",
+  "prediction_frozen_timestamp": "2026-10-25T14:30:00Z",
+  "prediction": "FAILURE_FOUND via universal.causal_alphabet: Automated exploration discovered proven invariant failure under write amplification (r11 event-compaction).",
+  "discovery_source": "MOCK_ORCHESTRATOR",
+  "primary_invariant": "r11",
+  "discovered_failures": [
+    {
+      "id": "failure-1",
+      "rule_id": "r11",
+      "status": "proven",
+      "description": "15MB state writes saturate storage IOPS. Primary storage bloats. Query performance degrades."
+    }
+  ],
+  "experiments_used": 4,
+  "confidence": 0.0,
+  "causal_sequence": [],
+  "counterexample": [],
+  "unpredicted_findings_in_interventions": [
+    {
+      "rule_id": "r04-network-idempotency",
+      "count": 2000,
+      "reason": "Intervention missing_idempotency_key triggered payment gateway idempotency violations, which is an artifact of the generic payment simulator and completely irrelevant to the feature distribution architecture."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "Retry storm with no budget envelope. Each retry burns tokens. Cost exceeds ticket value.",
+      "expected_invariant": "r10-unit-economics",
+      "outcome": "UNMATCHED (r04 fired instead of r10)"
+    },
+    {
+      "hypothesis": "Tool SIGSEGV on main thread. Host crashes. All active sessions severed.",
+      "expected_invariant": "r05-distributed-sagas",
+      "outcome": "UNMATCHED (no proven r05 finding)"
+    },
+    {
+      "hypothesis": "15MB state writes saturate storage IOPS. Primary storage bloats. Query performance degrades.",
+      "expected_invariant": "r11",
+      "outcome": "UNMATCHED (storage writeState trace event not emitted by matrix scenario)"
+    },
+    {
+      "hypothesis": "Saga partially completes. Worker loses state before compensation. Orphaned cloud resource left running.",
+      "expected_invariant": "r05-distributed-sagas",
+      "outcome": "UNMATCHED (no proven r05 finding)"
+    }
+  ]
+}
+

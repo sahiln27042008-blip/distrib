@@ -78,6 +78,18 @@ function resolveAuditor(): AuditorModule {
   throw new Error(`Auditor dist entry not found at ${distEntry}`);
 }
 
+function matchesFinding(f: Finding, ruleId: string): boolean {
+  if (f.status !== "proven") return false;
+  const fId = (f.rule_id || "").toLowerCase();
+  const target = (ruleId || "").toLowerCase();
+  if (fId === target) return true;
+  if (target.startsWith("r04") && fId.startsWith("r04")) return true;
+  if (target.startsWith("r05") && fId.startsWith("r05")) return true;
+  if (target.startsWith("r10") && fId.startsWith("r10")) return true;
+  if (target.startsWith("r11") && fId.startsWith("r11")) return true;
+  return false;
+}
+
 const VALID_DIALS = new Set([
   "A1_single_task",
   "A2_mixed_saas",
@@ -216,70 +228,28 @@ export const verifyFixTool: McpTool = {
       const fixedInternalTrace = auditor.parseLangChainCallbackJsonl(fixedJsonl);
       let fixedFindings = auditor.auditTrace(fixedInternalTrace);
 
-      // Synthesize findings for known matrix dial failure modes if the auditor trace
-      // adapter does not expose low-level span attributes for this dial combination:
-      const checkDialFailure = (cfg: MatrixConfig, ruleId: string) => {
-        const r = ruleId.toLowerCase();
-        if (r.includes("r04") || r.includes("idempotency")) {
-          return (cfg.C === "C5_legacy_erp_no_idem" || cfg.C === "C2_socket_drop_2ms_late") &&
-            (cfg.F === "F1_blind_retry_unbounded_spend" || cfg.F !== "F3_resilient_invariant_runtime");
-        }
-        if (r.includes("r11") || r.includes("compaction") || r.includes("write")) {
-          return cfg.B === "B3_write_amp_15mb";
-        }
-        if (r.includes("r05") || r.includes("saga")) {
-          return cfg.F === "F2_ask_llm_to_undo";
-        }
-        if (r.includes("r10") || r.includes("economic")) {
-          return cfg.D === "D1_raw_json_80k_flood" && cfg.F === "F1_blind_retry_unbounded_spend";
-        }
-        return false;
-      };
+      // Real matching findings only (NO synthesis)
+      const originalMatchingFindings = originalFindings.filter((f) => matchesFinding(f, findingRuleId));
+      const fixedMatchingFindings = fixedFindings.filter((f) => matchesFinding(f, findingRuleId));
 
-      if (!context?.auditor) {
-        if (!originalFindings.some(f => (f.rule_id === findingRuleId || (findingRuleId === "r11" && f.rule_id === "r11")) && f.status === "proven")) {
-          if (checkDialFailure(originalConfig, findingRuleId)) {
-            originalFindings = [
-              ...originalFindings,
-              {
-                rule_id: findingRuleId,
-                pillar: "matrix-failure-mode",
-                status: "proven",
-                severity: "critical",
-                message: `Proven failure under dial configuration for ${findingRuleId}`,
-                evidence: { span_ids: [originalTrace.spans[0]?.spanId || "span-root"] },
-                repro: `Run matrix with ${findingRuleId} failure dials`,
-                suggested_fix: "Apply resilient dials",
-              },
-            ];
-          }
-        }
-
-        if (!fixedFindings.some(f => (f.rule_id === findingRuleId || (findingRuleId === "r11" && f.rule_id === "r11")) && f.status === "proven")) {
-          if (checkDialFailure(fixedConfig, findingRuleId)) {
-            fixedFindings = [
-              ...fixedFindings,
-              {
-                rule_id: findingRuleId,
-                pillar: "matrix-failure-mode",
-                status: "proven",
-                severity: "critical",
-                message: `Proven failure under dial configuration for ${findingRuleId}`,
-                evidence: { span_ids: [fixedTrace.spans[0]?.spanId || "span-root"] },
-                repro: `Run matrix with ${findingRuleId} failure dials`,
-                suggested_fix: "Apply resilient dials",
-              },
-            ];
-          }
-        }
+      if (originalMatchingFindings.length === 0 && fixedMatchingFindings.length === 0) {
+        return {
+          success: true,
+          findingRuleId,
+          isFixed: false,
+          before: {
+            config: originalConfig,
+            matchingFindingsCount: 0,
+            allFindingsCount: originalFindings.length,
+          },
+          after: {
+            config: fixedConfig,
+            matchingFindingsCount: 0,
+            allFindingsCount: fixedFindings.length,
+          },
+          proof: "NO_REAL_FINDING: auditor produced no proven findings for either config",
+        };
       }
-
-      const originalMatchingFindings = originalFindings.filter(
-        (f) => (f.rule_id === findingRuleId || (findingRuleId === "r11" && f.rule_id === "r11")) && f.status === "proven"
-      );
-      const fixedMatchingFindings = fixedFindings.filter(
-        (f) => (f.rule_id === findingRuleId || (findingRuleId === "r11" && f.rule_id === "r11")) && f.status === "proven"
-      );
 
       const isFixed = originalMatchingFindings.length > 0 && fixedMatchingFindings.length === 0;
 

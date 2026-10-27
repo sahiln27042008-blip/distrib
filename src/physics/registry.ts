@@ -1,6 +1,7 @@
 import type { PhysicsPrimitive, PhysicsRegistry } from "./registry-types.ts";
 import { registerAdapters } from "./registry-adapters.ts";
 import { registerPrimitives } from "./primitives/index.ts";
+import { registerAlphabetPrimitive } from "./alphabet/primitive.ts";
 
 export function createPhysicsRegistry(): PhysicsRegistry {
   const primitives = new Map<string, PhysicsPrimitive>();
@@ -51,5 +52,7 @@ export function registerDefaults(reg: PhysicsRegistry): void {
   registerAdapters(reg);
   // Register 5 new primitives
   registerPrimitives(reg);
+  // Register universal causal alphabet primitive
+  registerAlphabetPrimitive(reg);
 }
 

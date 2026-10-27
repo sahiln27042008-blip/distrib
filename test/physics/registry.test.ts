@@ -19,7 +19,7 @@ test("Registry registers and retrieves primitives by ID", () => {
 test("Registry list returns all registered primitives", () => {
   const reg = getGlobalRegistry();
   const primitives = reg.list();
-  assert.equal(primitives.length, 11);
+  assert.equal(primitives.length, 12);
 
   const ids = primitives.map((p) => p.id);
   assert.ok(ids.includes("payment.idempotency"));
@@ -28,6 +28,7 @@ test("Registry list returns all registered primitives", () => {
   assert.ok(ids.includes("queue.duplicate_delivery"));
   assert.ok(ids.includes("tool.partial_success"));
   assert.ok(ids.includes("worker.state_loss"));
+  assert.ok(ids.includes("universal.causal_alphabet"));
 });
 
 test("findApplicable returns only relevant primitives for a payment architecture", () => {
@@ -64,7 +65,8 @@ test("findApplicable returns only relevant primitives for a queue architecture",
     ],
   };
 
-  const applicable = reg.findApplicable(world);
+  // Exclude universal primitives to assert dial-specific applicability
+  const applicable = reg.findApplicable(world).filter((p) => p.id !== "universal.causal_alphabet");
   const ids = applicable.map((p) => p.id);
 
   assert.equal(ids.length, 1);
@@ -82,7 +84,8 @@ test("findApplicable returns empty for unknown architecture", () => {
     ],
   };
 
-  const applicable = reg.findApplicable(world);
+  // Exclude universal primitives to assert dial-specific applicability
+  const applicable = reg.findApplicable(world).filter((p) => p.id !== "universal.causal_alphabet");
   assert.equal(applicable.length, 0);
 });
 
@@ -116,7 +119,7 @@ test("Registry IDs are stable and deterministic", () => {
   const ids2 = reg2.list().map((p) => p.id);
 
   assert.deepEqual(ids1, ids2);
-  assert.equal(ids1.length, 11);
+  assert.equal(ids1.length, 12);
 });
 
 test("Registering duplicate ID throws error", () => {

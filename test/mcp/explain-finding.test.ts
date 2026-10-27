@@ -111,7 +111,7 @@ test("explain_finding against mock returns deterministic explanation", async () 
     runId: "explain-deterministic",
     A: "A2_mixed_saas",
     B: "B1_zero_hold_2ms",
-    C: "C2_socket_drop_2ms_late",
+    C: "C5_legacy_erp_no_idem",
     D: "D5_cqrs_duckdb_blackboard_o1",
     E: "E4_state_leases_ipc_worker",
     F: "F1_blind_retry_unbounded_spend",

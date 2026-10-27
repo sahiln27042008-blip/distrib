@@ -98,6 +98,8 @@ export function exportChaosLangChainJsonl(trace: Trace): string {
       if (bodyHash) toolStart.body_hash = bodyHash;
       if (attrs.idempotency_key !== undefined) toolStart.idempotency_key = attrs.idempotency_key;
       if (attrs.retry_count !== undefined) toolStart.retry_count = Number(attrs.retry_count);
+      if (typeof attrs.saga_id === "string") toolStart.saga_id = attrs.saga_id;
+      if (typeof attrs.compensation_required === "boolean") toolStart.compensation_required = attrs.compensation_required;
       if (typeof attrs.attempt_of === "string") toolStart.attempt_of = attrs.attempt_of;
       else {
         const retryOf = span.links.find((link) => link.type === "retry_of")?.spanId;
@@ -137,6 +139,7 @@ export function exportChaosLangChainJsonl(trace: Trace): string {
         event: "tool_end",
         run_id: span.spanId,
         parent_run_id: parentRunId,
+        step_type: "storage_write",
         end_time: iso(span.endMs),
         metadata: metadata([`${span.spanId}:start`]),
       };
@@ -184,6 +187,7 @@ export function exportChaosLangChainJsonl(trace: Trace): string {
         parent_run_id: parentRunId,
         name: span.name,
         resource: "mock://saga/compensate",
+        step_type: "tool_call",
         start_time: iso(span.startMs),
         metadata: metadata(),
       };
@@ -191,14 +195,17 @@ export function exportChaosLangChainJsonl(trace: Trace): string {
       if (typeof attrs.compensation_required === "boolean") start.compensation_required = attrs.compensation_required;
       if (typeof attrs.compensation_for === "string") start.compensation_for = attrs.compensation_for;
       if (typeof attrs.compensation_order === "number") start.compensation_order = attrs.compensation_order;
+      if (typeof attrs.compensation_missing === "boolean") start.compensation_missing = attrs.compensation_missing;
       const end: Record<string, unknown> = {
         event_id: `${span.spanId}:end`,
         event: "tool_end",
         run_id: span.spanId,
         parent_run_id: parentRunId,
+        step_type: "tool_call",
         end_time: iso(span.endMs),
         metadata: metadata([`${span.spanId}:start`]),
       };
+      if (span.status !== "ok") end.error = span.status;
       push(span.startMs, start);
       push(span.endMs, end);
     }

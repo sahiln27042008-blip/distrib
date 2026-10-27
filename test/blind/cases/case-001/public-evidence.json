@@ -1,0 +1,125 @@
+{
+  "case_id": "case-001",
+  "system_name": "Cloudflare Bot Management Machine Learning Feature Pipeline",
+  "domain": "Edge Content Delivery & Web Application Security",
+  "evidence_source": "Public Cloudflare architecture blogs, ClickHouse database documentation, Edge Proxy whitepapers (pre-incident)",
+  "architecture": {
+    "actors": [
+      {
+        "id": "metadata_store",
+        "name": "ClickHouse Analytics Cluster",
+        "role": "Distributed columnar datastore holding web traffic logs, bot detections, and aggregated ML feature values",
+        "engine": "ReplacingMergeTree",
+        "documented_behavior": "Ingests analytics across distributed nodes. The ReplacingMergeTree engine deduplicates records with matching sorting keys asynchronously during background part merges. Queries without explicit aggregation or FINAL read unmerged parts and may observe duplicate rows."
+      },
+      {
+        "id": "feature_generator",
+        "name": "Feature Extraction & Generation Batch Worker",
+        "role": "Periodic scheduled worker executing batch queries against ClickHouse to extract current model feature values and compile a global feature configuration artifact",
+        "execution_model": "Cron batch job running on central management servers",
+        "authority": "Direct write permission to publish configuration files to the global replication bus"
+      },
+      {
+        "id": "distribution_bus",
+        "name": "Quicksilver Global Key-Value Store",
+        "role": "Low-latency distributed key-value propagation network replicating configurations globally across all edge PoPs within seconds",
+        "propagation": "Immediate global broadcast upon file write"
+      },
+      {
+        "id": "edge_proxy_worker",
+        "name": "Core Edge Proxy Daemon (FL / NGINX / Lua)",
+        "role": "High-concurrency edge traffic server evaluating incoming HTTP requests against ML bot scores and WAF rules",
+        "execution_model": "Multi-threaded worker pool within the core proxy process",
+        "in_memory_limits": "Allocates bounded internal memory structures and fixed-size rule/feature arrays sized according to documented maximum feature capacities",
+        "failure_modes": "Unhandled exceptions or memory structure corruptions during configuration load crash the proxy daemon process"
+      }
+    ],
+    "operations": [
+      {
+        "name": "query_metadata",
+        "caller": "feature_generator",
+        "target": "metadata_store",
+        "description": "Executes batch SELECT to retrieve calculated feature sets across distributed partitions"
+      },
+      {
+        "name": "compile_feature_file",
+        "caller": "feature_generator",
+        "target": "local_disk",
+        "description": "Serializes retrieved feature records into a binary/text configuration file"
+      },
+      {
+        "name": "publish_feature_file",
+        "caller": "feature_generator",
+        "target": "distribution_bus",
+        "description": "Commits compiled feature file to Quicksilver for global distribution"
+      },
+      {
+        "name": "replicate_feature_file",
+        "caller": "distribution_bus",
+        "target": "edge_proxy_worker",
+        "description": "Distributes updated file to all worldwide edge points of presence"
+      },
+      {
+        "name": "hydrate_feature_rules",
+        "caller": "edge_proxy_worker",
+        "target": "in_memory_table",
+        "description": "Parses received feature file into local in-memory lookup table"
+      },
+      {
+        "name": "score_traffic",
+        "caller": "edge_proxy_worker",
+        "target": "incoming_http_request",
+        "description": "Evaluates live client traffic against active bot management features"
+      }
+    ],
+    "state": [
+      {
+        "name": "clickhouse_partitions",
+        "owner": "metadata_store",
+        "characteristics": "Distributed table parts waiting for background merge compaction"
+      },
+      {
+        "name": "global_feature_artifact",
+        "owner": "distribution_bus",
+        "characteristics": "Serialized configuration file containing active feature definitions"
+      },
+      {
+        "name": "edge_feature_table",
+        "owner": "edge_proxy_worker",
+        "characteristics": "In-memory fixed-size buffer/array populated from the feature artifact"
+      }
+    ],
+    "authority_boundaries": [
+      "Feature generator possesses unilateral authority to publish configurations directly to production edge servers via Quicksilver.",
+      "Edge proxy automatically ingests and hot-reloads configuration files upon Quicksilver event arrival.",
+      "No independent canary verification stage or intermediate gating layer exists between feature generation and global propagation."
+    ],
+    "stated_limits_and_constraints": [
+      "Edge proxy feature table has a strict bounded capacity limit designed for known production feature counts.",
+      "ClickHouse ReplacingMergeTree does not guarantee deduplicated query results unless explicit deduplication or FINAL is executed.",
+      "Edge proxy daemons share fate: process crashes interrupt in-flight traffic and fail health checks."
+    ],
+    "documented_invariants": [
+      {
+        "id": "INV-1",
+        "name": "Bounded Consumer Payload",
+        "statement": "Produced configuration artifacts must never exceed the parsing and memory capacity limits of edge consumers."
+      },
+      {
+        "id": "INV-2",
+        "name": "Process Isolation & Fault Containment",
+        "statement": "Failure to parse or load an auxiliary ML feature configuration must never terminate the core proxy host or interrupt primary web traffic proxying."
+      },
+      {
+        "id": "INV-3",
+        "name": "Deterministic Read Idempotency & Deduplication",
+        "statement": "Queries against distributed eventual-consistency databases must ensure deduplicated result sets before artifact publication."
+      }
+    ],
+    "physical_assumptions": [
+      "The generator queries an eventual-consistency database without a canary gate.",
+      "The consumer has a fixed buffer limit.",
+      "The runtime runs on a single main process where an unhandled error is fatal."
+    ]
+  }
+}
