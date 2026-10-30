@@ -29,12 +29,17 @@ export class MetaClient implements Orchestrator {
     messages: OrchestratorMessage[],
     tools: ToolDefinition[]
   ): Promise<OrchestratorResponse> {
+    const enableThinking = process.env.ENABLE_THINKING === 'true';
     const body: Record<string, unknown> = {
+      max_tokens: 4096,
       model: this.config.model,
       messages: messages.map(m => this.convertMessage(m)),
       tools: tools.length > 0 ? tools : undefined,
       tool_choice: tools.length > 0 ? "auto" : undefined,
     };
+    if (this.config.baseUrl.includes("integrate.api.nvidia.com")) {
+      body.chat_template_kwargs = { enable_thinking: enableThinking };
+    }
 
     const baseUrl = this.config.baseUrl.replace(/\/+$/, "");
     const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -48,7 +53,7 @@ export class MetaClient implements Orchestrator {
     });
 
     if (!res.ok) {
-      throw new Error(`Meta API ${res.status}: ${await res.text()}`);
+      throw new Error(`LLM API ${res.status}: ${await res.text()}`);
     }
 
     const data = (await res.json()) as any;
@@ -62,6 +67,7 @@ export class MetaClient implements Orchestrator {
           typeof tc.function?.arguments === "string"
             ? JSON.parse(tc.function.arguments)
             : tc.function?.arguments ?? tc.arguments ?? {},
+        ...(tc.extra_content ? { extra_content: tc.extra_content } : {}),
       })),
       stop_reason:
         data.choices?.[0]?.finish_reason === "tool_calls" ? "tool_calls" : "stop",
@@ -87,6 +93,7 @@ export class MetaClient implements Orchestrator {
             name: tc.name,
             arguments: JSON.stringify(tc.arguments),
           },
+          ...(tc.extra_content ? { extra_content: tc.extra_content } : {}),
         })),
       };
     }
@@ -105,6 +112,15 @@ export function createOrchestrator(): Orchestrator {
       apiKey: process.env.META_API_KEY!,
       baseUrl: process.env.META_BASE_URL!,
       model: process.env.META_MODEL || "llama-3.3-70b",
+      timeoutMs: Number(process.env.META_TIMEOUT_MS) || 180000,
+    });
+  }
+  if (process.env.GOOGLE_API_KEY) {
+    return new MetaClient({
+      apiKey: process.env.GOOGLE_API_KEY,
+      baseUrl: process.env.GOOGLE_BASE_URL || "https://generativelanguage.googleapis.com/v1beta/openai/",
+      model: process.env.GOOGLE_MODEL || "gemini-3-flash-preview",
+      timeoutMs: Number(process.env.GOOGLE_TIMEOUT_MS) || 180000,
     });
   }
   return new MockOrchestrator(Number(process.env.MOCK_SEED) || 42);

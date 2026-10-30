@@ -21,6 +21,8 @@ import { runGateTool } from "./tools/run-gate.ts";
 import { causalAuditTool } from "./tools/causal-audit.ts";
 import { causalCliffTool } from "./tools/causal-cliff.ts";
 import { causalVerifyTool } from "./tools/causal-verify.ts";
+import { createWorkflowTool } from "./tools/create-workflow.ts";
+import { insertNodeTool } from "./tools/insert-node.ts";
 
 export const MCP_PROMPT_INSTRUCTIONS = SYSTEM_PROMPT;
 
@@ -38,6 +40,8 @@ export const TOOLS: McpTool[] = [
   causalAuditTool,
   causalCliffTool,
   causalVerifyTool,
+  createWorkflowTool,
+  insertNodeTool,
 ];
 
 export const TOOL_MAP = new Map(TOOLS.map(t => [t.name, t]));

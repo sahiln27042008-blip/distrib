@@ -28,7 +28,7 @@ interface AuditorModule {
 
 let cachedAuditor: AuditorModule | null = null;
 
-function resolveAuditor(): AuditorModule {
+export function resolveAuditor(): AuditorModule {
   if (cachedAuditor) return cachedAuditor;
 
   const envRepo = process.env.SIM_AUDITOR_REPO;

@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { exportChaosLangChainJsonl } from "../../chaos-auditor-adapter.ts";
 import type { Trace } from "../../trace.ts";
-import type { Finding } from "../../../../resilient-agent-invariants/src/types/finding.ts";
+import type { Finding } from "../../../../../resilient-agent-invariants/src/types/finding.ts";
 
 interface McpTool {
   name: string;

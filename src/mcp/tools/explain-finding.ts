@@ -1,6 +1,6 @@
 import { createOrchestrator } from "../../llm/meta-client.ts";
 import { EXPLAIN_FINDING_PROMPT } from "../../llm/prompts.ts";
-import type { Finding } from "../../../../resilient-agent-invariants/src/types/finding.ts";
+import type { Finding } from "../../../../../resilient-agent-invariants/src/types/finding.ts";
 import type { Trace } from "../../trace.ts";
 
 interface McpTool {

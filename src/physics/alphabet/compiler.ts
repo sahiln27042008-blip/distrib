@@ -6,6 +6,7 @@ import type {
   CompiledAlphabetGraph,
   Contract,
   DecompositionResult,
+  EpistemicConfidence,
   EpistemicState,
   InvoiceEvidence,
   Letter,

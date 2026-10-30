@@ -1,5 +1,6 @@
 import http from "node:http";
-import type { AddressInfo, IncomingHttpHeaders } from "node:net";
+import type { IncomingHttpHeaders } from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderCtoView } from "./ui/cto-view.ts";

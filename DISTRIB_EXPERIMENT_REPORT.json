@@ -1,0 +1,182 @@
+{
+  "metadata": {
+    "experiment": "DISTRIB 10-Letter Causal Alphabet + BFS Against Complex Agent Infrastructure",
+    "engine": "Deterministic Discrete Event Virtual Clock (Sim) + BFS Queue + Invariant Auditor",
+    "timestamp": "2026-10-27T20:27:47.978Z",
+    "totalScenarios": 6
+  },
+  "scenarios": [
+    {
+      "scenarioId": "scenario-A",
+      "name": "Duplicate Transaction Under Network Sever / Timeout",
+      "status": "FAILURE_FOUND",
+      "isRepresentable": true,
+      "baselinePassed": true,
+      "baselineViolations": [],
+      "counterexampleFound": [
+        {
+          "consonantKind": "SEVER",
+          "targetVowelId": "chan-payment",
+          "params": {
+            "phase": "POST_COMMIT"
+          }
+        }
+      ],
+      "shortestDepth": 1,
+      "evaluations": 2,
+      "statesExplored": 2,
+      "reproducedOnReplay": true,
+      "violatedInvariants": [
+        "payment_safety",
+        "idempotency",
+        "r04-network-idempotency"
+      ],
+      "auditorEvidence": [
+        "[r10-unit-economics] Trace run root does not declare an explicit non-negative numeric budget."
+      ],
+      "ablationComparison": {
+        "ablationName": "Enforce Provider Idempotency",
+        "baselineStatus": "FAILURE_FOUND",
+        "faultStatus": "FAILURE_FOUND",
+        "difference": "With un-enforced idempotency: FAILURE_FOUND (violated: payment_safety, idempotency, r04-network-idempotency). With enforced idempotency: FAILURE_FOUND (0 violations)."
+      }
+    },
+    {
+      "scenarioId": "scenario-B",
+      "name": "Crash Between External Side Effect and Durable Checkpoint",
+      "status": "FAILURE_FOUND",
+      "isRepresentable": true,
+      "baselinePassed": true,
+      "baselineViolations": [],
+      "counterexampleFound": [
+        {
+          "consonantKind": "SATURATE",
+          "targetVowelId": "lease-supervisor",
+          "params": {
+            "loadUnits": 5
+          }
+        }
+      ],
+      "shortestDepth": 1,
+      "evaluations": 2,
+      "statesExplored": 2,
+      "reproducedOnReplay": true,
+      "violatedInvariants": [
+        "payment_safety",
+        "idempotency",
+        "resource_safety",
+        "recovery",
+        "result_integrity",
+        "r04-network-idempotency"
+      ],
+      "auditorEvidence": [
+        "[r10-unit-economics] Trace run root does not declare an explicit non-negative numeric budget."
+      ]
+    },
+    {
+      "scenarioId": "scenario-C",
+      "name": "Lease Expiry & Stale Worker State Mutation",
+      "status": "FAILURE_FOUND",
+      "isRepresentable": true,
+      "baselinePassed": true,
+      "baselineViolations": [],
+      "counterexampleFound": [
+        {
+          "consonantKind": "DELAY",
+          "targetVowelId": "chan-tool-router",
+          "params": {
+            "durationMs": 40000
+          }
+        },
+        {
+          "consonantKind": "DELAY",
+          "targetVowelId": "chan-tool-router",
+          "params": {
+            "durationMs": 40000
+          }
+        }
+      ],
+      "shortestDepth": 2,
+      "evaluations": 4,
+      "statesExplored": 4,
+      "reproducedOnReplay": true,
+      "violatedInvariants": [
+        "idempotency",
+        "r04-network-idempotency"
+      ],
+      "auditorEvidence": [
+        "[r10-unit-economics] Trace run root does not declare an explicit non-negative numeric budget."
+      ],
+      "ablationComparison": {
+        "ablationName": "Disable Fencing Token Check",
+        "baselineStatus": "FAILURE_FOUND",
+        "faultStatus": "FAILURE_FOUND",
+        "difference": "With fencing enabled: FAILURE_FOUND (stale write caught). With fencing disabled: FAILURE_FOUND (stale write accepted)."
+      }
+    },
+    {
+      "scenarioId": "scenario-D",
+      "name": "Database Connection Pool Saturation & Liveness Collapse",
+      "status": "NO_FAILURE_WITHIN_BOUND",
+      "isRepresentable": true,
+      "baselinePassed": true,
+      "baselineViolations": [],
+      "evaluations": 7,
+      "statesExplored": 7,
+      "reproducedOnReplay": false,
+      "violatedInvariants": [],
+      "auditorEvidence": [
+        "[r10-unit-economics] Trace run root does not declare an explicit non-negative numeric budget."
+      ]
+    },
+    {
+      "scenarioId": "scenario-E",
+      "name": "Cancellation Race: Delayed Cancellation Signal",
+      "status": "FAILURE_FOUND",
+      "isRepresentable": true,
+      "baselinePassed": true,
+      "baselineViolations": [],
+      "counterexampleFound": [
+        {
+          "consonantKind": "DELAY",
+          "targetVowelId": "chan-tool-router",
+          "params": {
+            "durationMs": 5000
+          }
+        },
+        {
+          "consonantKind": "DELAY",
+          "targetVowelId": "chan-tool-router",
+          "params": {
+            "durationMs": 5000
+          }
+        }
+      ],
+      "shortestDepth": 2,
+      "evaluations": 4,
+      "statesExplored": 4,
+      "reproducedOnReplay": true,
+      "violatedInvariants": [
+        "idempotency",
+        "r04-network-idempotency"
+      ],
+      "auditorEvidence": [
+        "[r10-unit-economics] Trace run root does not declare an explicit non-negative numeric budget."
+      ]
+    },
+    {
+      "scenarioId": "scenario-F",
+      "name": "Event Replay & Multi-Master Checkpoint Divergence",
+      "status": "INSUFFICIENT_PHYSICS",
+      "isRepresentable": false,
+      "baselinePassed": true,
+      "baselineViolations": [],
+      "evaluations": 0,
+      "statesExplored": 0,
+      "violatedInvariants": [],
+      "auditorEvidence": [
+        "The current deterministic virtual-clock simulator models single-timeline actor event queues and does not model multi-master consensus divergence (Raft/Paxos partition splits). Correctly classified as INSUFFICIENT_PHYSICS."
+      ]
+    }
+  ]
+}
