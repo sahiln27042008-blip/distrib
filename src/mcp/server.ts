@@ -413,6 +413,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
             typeof params === "string"
               ? params
               : params.text || params.message || params.content || "";
+          const userImage = typeof params === "object" && params !== null ? params.image : undefined;
 
           // Support seeding history directly from params (e.g. simulated prior runs)
           if (Array.isArray(params.history)) {
@@ -435,6 +436,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
             const result: AgentLoopResult = await runAgentLoop({
               history: session.history,
               userText,
+              userImage,
               tools: registeredTools,
               orchestrator,
               context: { sessionId: session.id, vscode: undefined },
@@ -461,6 +463,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
           const result: AgentLoopResult = await runAgentLoop({
             history: session.history,
             userText,
+            userImage,
             tools: registeredTools,
             orchestrator,
             context: { sessionId: session.id, vscode: undefined },

@@ -31,6 +31,7 @@ export interface McpTool {
 export async function runAgentLoop(opts: {
   history: OrchestratorMessage[];
   userText: string;
+  userImage?: string | null;
   tools: McpTool[];
   orchestrator?: Orchestrator; // optional, defaults to createOrchestrator()
   context?: any;
@@ -40,7 +41,31 @@ export async function runAgentLoop(opts: {
   if (messages.length === 0 || messages[0]?.role !== "system") {
     messages.unshift({ role: "system", content: SYSTEM_PROMPT });
   }
-  messages.push({ role: "user", content: opts.userText });
+
+  if (opts.userImage) {
+    const model = (orchestrator as any)?.config?.model || "";
+    const isVision =
+      model.toLowerCase().includes("vision") ||
+      model.toLowerCase().includes("vl") ||
+      model.toLowerCase().includes("llama-3.2-11b-vision") ||
+      model.toLowerCase().includes("llama-3.2-90b-vision") ||
+      !model;
+
+    if (isVision) {
+      messages.push({
+        role: "user",
+        content: [
+          { type: "text", text: opts.userText },
+          { type: "image_url", image_url: { url: opts.userImage } },
+        ],
+      } as any);
+    } else {
+      console.warn(`Model ${model} is not a vision model, sending text only`);
+      messages.push({ role: "user", content: opts.userText });
+    }
+  } else {
+    messages.push({ role: "user", content: opts.userText });
+  }
 
   const toolDefs = (opts.tools || []).map(t => ({
     type: "function" as const,

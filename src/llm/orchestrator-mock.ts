@@ -1,5 +1,12 @@
 import type { Orchestrator, OrchestratorMessage, OrchestratorResponse, ToolCall } from "./orchestrator.ts";
 
+function messageText(content: OrchestratorMessage["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => (typeof part === "string" ? part : part?.text || ""))
+    .join(" ");
+}
+
 // The mock returns canned tool_calls based on keywords in the 
 // user message. This lets all Stage 2 tests pass without burning 
 // API tokens. The user swaps to meta-client.ts at the end.
@@ -12,7 +19,7 @@ export class MockOrchestrator implements Orchestrator {
 
   async chat(messages: OrchestratorMessage[], _tools: unknown): Promise<OrchestratorResponse> {
     const lastUser = [...messages].reverse().find(m => m.role === "user");
-    const userText = (lastUser?.content || "").toLowerCase();
+    const userText = messageText(lastUser?.content || "").toLowerCase();
 
     // Check if a tool has already been invoked after the last user message
     const lastUserIndex = messages.findLastIndex
@@ -39,7 +46,7 @@ export class MockOrchestrator implements Orchestrator {
         toolCalls.push({
           id: `call-${Date.now()}-1`,
           name: "describe_system",
-          arguments: { description: lastUser?.content || "" },
+          arguments: { description: userText },
         });
       }
     }
@@ -53,8 +60,8 @@ export class MockOrchestrator implements Orchestrator {
       // After a run_matrix tool result, ask to audit
       const priorMatrix = messages.some(
         m =>
-          (m.role === "tool" && m.content.includes("traceId")) ||
-          (m.content && m.content.includes("traceId"))
+          (m.role === "tool" && messageText(m.content).includes("traceId")) ||
+          messageText(m.content).includes("traceId")
       );
       if (priorMatrix && !wasCalledSinceUser("audit_trace")) {
         toolCalls.push({

@@ -1,6 +1,6 @@
 export interface OrchestratorMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | any[];
   name?: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string; // for tool results
