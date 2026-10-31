@@ -1,7 +1,7 @@
 // enterpriseee/enterprise-simulator/src/mcp/tools/causal-cliff.ts
 
 import { findCollapseCliff } from "../../physics/search/cliff-finder.ts";
-import { resolveScenario, type ToolContext, type ToolResult, type McpTool } from "./causal-audit.ts";
+import { resolveScenario, resolveWorkflow, workflowToGraph, type ToolContext, type ToolResult, type McpTool } from "./causal-audit.ts";
 
 export const causalCliffTool: McpTool = {
   name: "sweep_latency_cliff",
@@ -14,10 +14,12 @@ export const causalCliffTool: McpTool = {
       targetChannel: { type: "string", description: "Channel ID to sweep" },
       minMs: { type: "number", default: 0 },
       maxMs: { type: "number", default: 60000 },
+      tolerance: { type: "number", default: 50 },
+      seed: { type: "number", default: 42817 },
     },
     required: ["scenarioId", "targetChannel"],
   },
-  async handler(args: Record<string, unknown>, _context?: ToolContext): Promise<ToolResult> {
+  async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
     const scenarioId = args.scenarioId as string | undefined;
     if (!scenarioId || typeof scenarioId !== "string" || scenarioId.trim() === "") {
       return {
@@ -34,8 +36,10 @@ export const causalCliffTool: McpTool = {
       };
     }
 
-    const scenario = resolveScenario(scenarioId);
-    if (!scenario) {
+    const normalizedScenarioId = scenarioId.trim().replace(/\./g, "-").toLowerCase();
+    const scenario = resolveScenario(normalizedScenarioId);
+    const workflow = scenario ? undefined : resolveWorkflow(scenarioId, context?.sessionId);
+    if (!scenario && !workflow) {
       return {
         success: false,
         error: `Unknown scenario: ${scenarioId}`,
@@ -56,7 +60,7 @@ export const causalCliffTool: McpTool = {
         : 42817;
 
     const startedAt = performance.now();
-    const graph = scenario.buildGraph();
+    const graph = scenario ? scenario.buildGraph() : workflowToGraph(workflow!);
 
     const channelExists =
       graph.channels.some((c) => c.id === targetChannel) ||
@@ -65,7 +69,7 @@ export const causalCliffTool: McpTool = {
     if (!channelExists) {
       return {
         success: false,
-        error: `Target channel '${targetChannel}' not found in scenario '${scenarioId}'`,
+        error: `Target channel '${targetChannel}' not found in workflow or scenario '${scenarioId}'`,
       };
     }
 
@@ -96,7 +100,7 @@ export const causalCliffTool: McpTool = {
       return {
         success: true,
         status: cliff.status,
-        scenarioId: scenario.id,
+        scenarioId: scenario?.id ?? workflow?.id,
         targetChannel,
         cliffMs,
         safeMs: cliff.lowerSafeBound,

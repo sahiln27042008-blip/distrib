@@ -5,7 +5,10 @@ import { SCENARIO_DEFINITIONS } from "../../physics/distrib/distrib-scenarios.ts
 import { buildAdversarialAgentWorld } from "../../physics/distrib/distrib-world.ts";
 import { Channel } from "../../physics/alphabet/vowels/channel.ts";
 import { Cell } from "../../physics/alphabet/vowels/cell.ts";
+import { Log } from "../../physics/alphabet/vowels/log.ts";
+import { Lease } from "../../physics/alphabet/vowels/lease.ts";
 import type { CompiledAlphabetGraph } from "../../physics/alphabet/types.ts";
+import { getWorkflow, type Workflow } from "../../compiler/workflow-store.ts";
 
 export interface ToolContext {
   sessionId?: string;
@@ -42,8 +45,80 @@ export interface ResolvedScenario {
   }>;
 }
 
+export function workflowToGraph(workflow: Workflow): CompiledAlphabetGraph {
+  const actors = workflow.nodes.map((node) => ({
+    id: `actor-${node.index}`,
+    name: node.nodeName,
+  }));
+  const vowels: CompiledAlphabetGraph["vowels"] = [];
+  const channels: Channel[] = [];
+
+  for (const node of workflow.nodes) {
+    const actorId = `actor-${node.index}`;
+    for (const [substrateIndex, substrate] of node.substrates.entries()) {
+      const id = `vowel-${node.index}-${substrateIndex + 1}`;
+      const params = substrate.params ?? {};
+      if (substrate.vowel === "REGISTER" || substrate.vowel === "CELL") {
+        vowels.push(new Cell({
+          id,
+          actorId,
+          persistence: params.persistence === "DURABLE" ? "DURABLE" : "VOLATILE",
+          idempotencyEnforced: params.idempotencyEnforced === true,
+          fencingTokenEnforced: params.fencingTokenEnforced === true,
+        }));
+      } else if (substrate.vowel === "LOG") {
+        vowels.push(new Log({
+          id,
+          actorId,
+          maxCapacity: typeof params.maxCapacity === "number" ? params.maxCapacity : 1000,
+          compactionLagMs: typeof params.compactionLagMs === "number" ? params.compactionLagMs : 0,
+          deduplicateOnCompact: params.deduplicateOnCompact === true,
+        }));
+      } else if (substrate.vowel === "LEASE") {
+        vowels.push(new Lease({
+          id,
+          actorId,
+          maxCapacity: typeof params.maxCapacity === "number" ? params.maxCapacity : 1,
+          ttlMs: typeof params.ttlMs === "number" ? params.ttlMs : 30_000,
+          overflowPolicy: "WAIT_TIMEOUT",
+          heldDuringExternalChannel: params.heldDuringExternalChannel === true,
+        }));
+      }
+    }
+  }
+
+  // The workflow store has no explicit edge model; this inferred chain is a documented approximation.
+  for (let index = 0; index < workflow.nodes.length - 1; index++) {
+    const source = workflow.nodes[index];
+    const target = workflow.nodes[index + 1];
+    if (!source || !target) continue;
+    const channel = new Channel({
+      id: `channel-${source.index}-${target.index}`,
+      sourceActorId: `actor-${source.index}`,
+      targetActorId: `actor-${target.index}`,
+      timeoutMs: 10_000,
+    });
+    channels.push(channel);
+    vowels.push(channel);
+  }
+
+  return {
+    actors,
+    vowels,
+    channels,
+    contracts: [],
+    candidatePerturbations: [],
+    epistemicStatus: ["INFERRED"],
+    unrepresentableSemantics: ["Workflow dependencies are approximated as a sequential chain because the workflow store has no edge model."],
+  };
+}
+
+export function resolveWorkflow(scenarioId: string, sessionId?: string): Workflow | undefined {
+  return getWorkflow(scenarioId.trim(), sessionId);
+}
+
 export function resolveScenario(scenarioId: string): ResolvedScenario | undefined {
-  const norm = scenarioId.trim().toLowerCase();
+  const norm = scenarioId.trim().replace(/\./g, "-").toLowerCase();
 
   // Special scenario: timeout-cliff
   if (norm === "timeout-cliff" || norm === "scenario-cliff" || norm === "cliff") {
@@ -164,7 +239,7 @@ export const causalAuditTool: McpTool = {
     },
     required: ["scenarioId"],
   },
-  async handler(args: Record<string, unknown>, _context?: ToolContext): Promise<ToolResult> {
+  async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
     const scenarioId = args.scenarioId as string | undefined;
 
     if (!scenarioId || typeof scenarioId !== "string" || scenarioId.trim() === "") {
@@ -174,15 +249,17 @@ export const causalAuditTool: McpTool = {
       };
     }
 
-    const scenario = resolveScenario(scenarioId);
-    if (!scenario) {
+    const normalizedScenarioId = scenarioId.trim().replace(/\./g, "-").toLowerCase();
+    const scenario = resolveScenario(normalizedScenarioId);
+    const workflow = scenario ? undefined : resolveWorkflow(scenarioId, context?.sessionId);
+    if (!scenario && !workflow) {
       return {
         success: false,
         error: `Unknown scenario: ${scenarioId}`,
       };
     }
 
-    if (!scenario.isRepresentable) {
+    if (scenario && !scenario.isRepresentable) {
       return {
         success: true,
         verdict: "BLOCKED",
@@ -207,9 +284,9 @@ export const causalAuditTool: McpTool = {
         : 42817;
 
     const startedAt = performance.now();
-    const graph = scenario.buildGraph();
+    const graph = scenario ? scenario.buildGraph() : workflowToGraph(workflow!);
 
-    if (scenario.candidateFaults && scenario.candidateFaults.length > 0) {
+    if (scenario?.candidateFaults && scenario.candidateFaults.length > 0) {
       graph.candidatePerturbations = scenario.candidateFaults.map((f) => ({
         consonant: { kind: f.consonantKind, ...f.params } as any,
         targetId: f.targetVowelId,
@@ -233,7 +310,7 @@ export const causalAuditTool: McpTool = {
         success: true,
         verdict,
         status: searchResult.status,
-        scenarioId: scenario.id,
+        scenarioId: scenario?.id ?? workflow?.id,
         shortestDepth: searchResult.minimalCounterexample
           ? searchResult.minimalCounterexample.length
           : isApproved

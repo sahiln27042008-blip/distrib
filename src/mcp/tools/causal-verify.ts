@@ -1,7 +1,7 @@
 // enterpriseee/enterprise-simulator/src/mcp/tools/causal-verify.ts
 
 import { searchFaults } from "../../physics/search/fault-search.ts";
-import { resolveScenario, type ToolContext, type ToolResult, type McpTool } from "./causal-audit.ts";
+import { resolveScenario, resolveWorkflow, workflowToGraph, type ToolContext, type ToolResult, type McpTool } from "./causal-audit.ts";
 import { Cell } from "../../physics/alphabet/vowels/cell.ts";
 import { Lease } from "../../physics/alphabet/vowels/lease.ts";
 
@@ -16,12 +16,12 @@ export const causalVerifyTool: McpTool = {
       seed: { type: "number", default: 42817 },
       ablation: {
         type: "string",
-        enum: ["enforce_idempotency", "fencing_token_enabled", "zero_hold_lease"],
+        enum: ["enforce_idempotency", "fencing_token_enabled", "zero_hold_lease", "idempotency", "fencing", "lease", "release_before_llm"],
       },
     },
     required: ["scenarioId", "ablation"],
   },
-  async handler(args: Record<string, unknown>, _context?: ToolContext): Promise<ToolResult> {
+  async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
     const scenarioId = args.scenarioId as string | undefined;
     if (!scenarioId || typeof scenarioId !== "string" || scenarioId.trim() === "") {
       return {
@@ -38,8 +38,24 @@ export const causalVerifyTool: McpTool = {
       };
     }
 
-    const scenario = resolveScenario(scenarioId);
-    if (!scenario) {
+    const ablationAliases: Record<string, string> = {
+      idempotency: "enforce_idempotency",
+      fencing: "fencing_token_enabled",
+      lease: "zero_hold_lease",
+      release_before_llm: "zero_hold_lease",
+    };
+    const normalizedAblation = ablationAliases[ablation] ?? ablation;
+    if (!["enforce_idempotency", "fencing_token_enabled", "zero_hold_lease"].includes(normalizedAblation)) {
+      return {
+        success: false,
+        error: `Unsupported ablation: ${ablation}. Supported: enforce_idempotency, fencing_token_enabled, zero_hold_lease, idempotency, fencing, lease, release_before_llm`,
+      };
+    }
+
+    const normalizedScenarioId = scenarioId.trim().replace(/\./g, "-").toLowerCase();
+    const scenario = resolveScenario(normalizedScenarioId);
+    const workflow = scenario ? undefined : resolveWorkflow(scenarioId, context?.sessionId);
+    if (!scenario && !workflow) {
       return {
         success: false,
         error: `Unknown scenario: ${scenarioId}`,
@@ -54,27 +70,27 @@ export const causalVerifyTool: McpTool = {
     const startedAt = performance.now();
 
     // Map ablation name to graph builder parameter
-    let graphAblationArg: string | undefined = ablation;
-    if (ablation === "enforce_idempotency") {
+    let graphAblationArg: string | undefined = normalizedAblation;
+    if (normalizedAblation === "enforce_idempotency") {
       graphAblationArg = "idempotent_provider";
     }
 
-    const graph = scenario.buildGraph(graphAblationArg);
+    const graph = scenario ? scenario.buildGraph(graphAblationArg) : workflowToGraph(workflow!);
 
     // Apply ablation modifications to vowels directly
-    if (ablation === "enforce_idempotency") {
+    if (normalizedAblation === "enforce_idempotency") {
       for (const vowel of graph.vowels) {
         if (vowel.kind === "CELL" && vowel instanceof Cell) {
           (vowel as any).idempotencyEnforced = true;
         }
       }
-    } else if (ablation === "fencing_token_enabled") {
+    } else if (normalizedAblation === "fencing_token_enabled") {
       for (const vowel of graph.vowels) {
         if (vowel.kind === "CELL" && vowel instanceof Cell) {
           (vowel as any).fencingTokenEnforced = true;
         }
       }
-    } else if (ablation === "zero_hold_lease") {
+    } else if (normalizedAblation === "zero_hold_lease") {
       for (const vowel of graph.vowels) {
         if (vowel.kind === "LEASE" && vowel instanceof Lease) {
           (vowel as any).heldDuringExternalChannel = false;
@@ -82,7 +98,7 @@ export const causalVerifyTool: McpTool = {
       }
     }
 
-    if (scenario.candidateFaults && scenario.candidateFaults.length > 0) {
+    if (scenario?.candidateFaults && scenario.candidateFaults.length > 0) {
       graph.candidatePerturbations = scenario.candidateFaults.map((f) => ({
         consonant: { kind: f.consonantKind, ...f.params } as any,
         targetId: f.targetVowelId,
@@ -108,8 +124,8 @@ export const causalVerifyTool: McpTool = {
         success: true,
         verdict,
         status: searchResult.status,
-        scenarioId: scenario.id,
-        ablation,
+        scenarioId: scenario?.id ?? workflow?.id,
+        ablation: normalizedAblation,
         immuneUpToDepth,
         regressionCheck,
         shortestDepth: searchResult.minimalCounterexample

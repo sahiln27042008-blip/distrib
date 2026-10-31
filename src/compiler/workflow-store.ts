@@ -24,6 +24,7 @@ export interface Workflow {
 }
 
 const store = new Map<string, Workflow>();
+const workflowsBySession = new Map<string, Set<string>>();
 
 /**
  * Creates and initializes a new workflow in the in-memory store.
@@ -34,9 +35,14 @@ export function createWorkflow(
   declaredInvariants: string[] = [],
   systemDescription?: string,
 ): Workflow {
+  let uniqueId = id;
+  let suffix = 2;
+  while (store.has(uniqueId)) {
+    uniqueId = `${id}-${suffix++}`;
+  }
   const now = Date.now();
   const workflow: Workflow = {
-    id,
+    id: uniqueId,
     name,
     declaredInvariants: Array.isArray(declaredInvariants) ? [...declaredInvariants] : [],
     nodes: [],
@@ -45,8 +51,19 @@ export function createWorkflow(
     ...(systemDescription ? { systemDescription } : {}),
   };
 
-  store.set(id, workflow);
+  store.set(uniqueId, workflow);
   return workflow;
+}
+
+export function associateWorkflowWithSession(workflowId: string, sessionId: string): void {
+  if (!store.has(workflowId)) return;
+  const workflowIds = workflowsBySession.get(sessionId) ?? new Set<string>();
+  workflowIds.add(workflowId);
+  workflowsBySession.set(sessionId, workflowIds);
+}
+
+export function isWorkflowOwnedBySession(workflowId: string, sessionId: string): boolean {
+  return workflowsBySession.get(sessionId)?.has(workflowId) ?? false;
 }
 
 /**
@@ -95,7 +112,8 @@ export function insertNode(
 /**
  * Retrieves a workflow by ID including all sequentially inserted nodes.
  */
-export function getWorkflow(workflowId: string): Workflow | undefined {
+export function getWorkflow(workflowId: string, sessionId?: string): Workflow | undefined {
+  if (sessionId && !isWorkflowOwnedBySession(workflowId, sessionId)) return undefined;
   return store.get(workflowId);
 }
 
@@ -111,5 +129,6 @@ export function listWorkflows(): string[] {
  */
 export function clearWorkflows(): void {
   store.clear();
+  workflowsBySession.clear();
 }
 

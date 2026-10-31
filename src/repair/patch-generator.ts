@@ -15,7 +15,9 @@ Return JSON with:
 - explanation: why this fixes the failure
 - dialEquivalent: which dial change represents this fix (dial: "C", from: "C5_legacy_erp_no_idem", to: "C1_clean_20ms")
 
-The patch should be a real diff that a developer could apply. Ground it in the actual finding evidence (span IDs, retry counts, idempotency key absence).`;
+The patch should be a real diff that a developer could apply. Ground it in the actual finding evidence (span IDs, retry counts, idempotency key absence).
+
+For network idempotency fixes, derive the key deterministically from stable identifiers for the same logical operation (for example, operation ID or order ID plus amount). The same operation must produce the same key on every retry. Never use UUIDs, random values, current timestamps, or date-only values in an idempotency key. Only reference identifiers that exist in the shown code or input evidence; do not invent variable names.`;
 
 export async function generatePatch(
   finding: Finding,
@@ -85,6 +87,15 @@ function parsePatchResponse(
     raw = null;
   }
 
+  const isIdempotencyFinding = /r04|idempotency/i.test(finding.rule_id || "");
+  if (
+    isIdempotencyFinding &&
+    typeof raw?.diff === "string" &&
+    /uuid|randomUUID|randomBytes|Math\.random|Date\.now|current_timestamp|utcnow|datetime\.now|\.date\(\)/i.test(raw.diff)
+  ) {
+    raw = null;
+  }
+
   const canned = getCannedPatch(finding, originalConfig);
   const spanId = finding.evidence?.span_ids?.[0] || "unknown";
 
@@ -120,10 +131,12 @@ export function getCannedPatch(
 +++ b/src/refund.ts
 @@ -45,6 +45,10 @@
  async function processRefund(orderId, amount) {
++  // Never use UUIDs, random values, or timestamps in idempotency keys.
++  // This key is stable across retries for the same refund operation.
 +  // Generate stable idempotency key from operation identity
 +  const idempotencyKey = crypto
 +    .createHash('sha256')
-+    .update(\`\${runId}_\${orderId}_\${amount}\`)
++    .update(\`refund:\${orderId}:\${amount}\`)
 +    .digest('hex');
 +
    const response = await stripe.charges.create({
