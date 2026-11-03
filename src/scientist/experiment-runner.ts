@@ -61,7 +61,7 @@ export async function runExperiment(
   const scenario = new MatrixScenario(experimentConfig);
   scenario.run();
   const snapshot = scenario.snapshot();
-  const trace = scenario.exportTrace();
+  const trace = scenario.exportTrace() as Trace;
 
   // Audit the trace
   const jsonl = exportChaosLangChainJsonl(trace);
@@ -77,9 +77,15 @@ export async function runExperiment(
 
   // Extract business impact from snapshot
   const snap = snapshot as any;
-  const duplicateDollars = snap?.network?.duplicateDollars ?? 0;
-  const orphanedResources = snap?.recovery?.orphansLeft ?? 0;
-  const costUsd = snap?.economics?.costUsd ?? 0;
+  const duplicateDollars = Number.isFinite(snap?.network?.duplicateDollars)
+    ? snap.network.duplicateDollars as number
+    : undefined;
+  const orphanedResources = Number.isFinite(snap?.recovery?.orphansLeft)
+    ? snap.recovery.orphansLeft as number
+    : undefined;
+  const costUsd = Number.isFinite(snap?.economics?.costUsd)
+    ? snap.economics.costUsd as number
+    : undefined;
 
   return {
     hypothesisId: hypothesis.id,

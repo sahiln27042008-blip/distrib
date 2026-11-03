@@ -7,7 +7,7 @@ test("10 matrix configs all run successfully and deterministically", () => {
   assert.ok(presets.length >= 10, `expected at least 10 presets, got ${presets.length}`);
 
   for (let i = 0; i < 10; i++) {
-    const cfg = presets[i];
+    const cfg = presets[i]!;
     const sc1 = new MatrixScenario(cfg);
     sc1.run();
     const snap1 = sc1.snapshot();

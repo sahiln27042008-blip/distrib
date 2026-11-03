@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MatrixScenario } from "../src/matrix-copy.ts";
 import { exportChaosLangChainJsonl } from "../src/chaos-auditor-adapter.ts";
 import type { Trace } from "../src/trace.ts";
@@ -35,7 +35,7 @@ if (hasAuditor) {
     const trace = scenario.exportTrace() as Trace;
     const jsonl = exportChaosLangChainJsonl(trace);
     const findings = auditTrace(parseLangChainCallbackJsonl(jsonl));
-    const has = findings.some((f) => f.rule_id === "r11" && f.status === "proven");
+    const has = findings.some((f: { rule_id?: string; status?: string }) => f.rule_id === "r11" && f.status === "proven");
     if (!has) {
       console.log("Skipping R11: matrix trace did not expose a primary-storage oversized write.");
       return;

@@ -9,6 +9,7 @@ import { Log } from "../../physics/alphabet/vowels/log.ts";
 import { Lease } from "../../physics/alphabet/vowels/lease.ts";
 import type { CompiledAlphabetGraph } from "../../physics/alphabet/types.ts";
 import { getWorkflow, type Workflow } from "../../compiler/workflow-store.ts";
+import { normalizeConsonantAlias } from "../../physics/alphabet/apply.ts";
 
 export interface ToolContext {
   sessionId?: string;
@@ -52,6 +53,18 @@ export function workflowToGraph(workflow: Workflow): CompiledAlphabetGraph {
   }));
   const vowels: CompiledAlphabetGraph["vowels"] = [];
   const channels: Channel[] = [];
+  const nodeIndexByName = new Map(workflow.nodes.map((node) => [node.nodeName, node.index]));
+  const nodeIdempotencyByActor = new Map<string, boolean>();
+
+  for (const node of workflow.nodes) {
+    const actorId = `actor-${node.index}`;
+    for (const substrate of node.substrates) {
+      const params = substrate.params ?? {};
+      if ((substrate.vowel === "REGISTER" || substrate.vowel === "CELL") && params.idempotencyEnforced === true) {
+        nodeIdempotencyByActor.set(actorId, true);
+      }
+    }
+  }
 
   for (const node of workflow.nodes) {
     const actorId = `actor-${node.index}`;
@@ -75,41 +88,122 @@ export function workflowToGraph(workflow: Workflow): CompiledAlphabetGraph {
           deduplicateOnCompact: params.deduplicateOnCompact === true,
         }));
       } else if (substrate.vowel === "LEASE") {
+        const overflowPolicy = params.overflowPolicy === "REJECT_429" || params.overflowPolicy === "PANIC_CRASH"
+          ? params.overflowPolicy
+          : "WAIT_TIMEOUT";
         vowels.push(new Lease({
           id,
           actorId,
           maxCapacity: typeof params.maxCapacity === "number" ? params.maxCapacity : 1,
           ttlMs: typeof params.ttlMs === "number" ? params.ttlMs : 30_000,
-          overflowPolicy: "WAIT_TIMEOUT",
+          overflowPolicy,
           heldDuringExternalChannel: params.heldDuringExternalChannel === true,
         }));
+      } else if (substrate.vowel === "CHANNEL") {
+        const targetNodeIndex = typeof params.targetNodeId === "string"
+          ? nodeIndexByName.get(params.targetNodeId)
+          : undefined;
+        const targetActorId = typeof targetNodeIndex === "number"
+          ? `actor-${targetNodeIndex}`
+          : actorId;
+        const channel = new Channel({
+          id,
+          sourceActorId: actorId,
+          targetActorId,
+          timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : 10_000,
+          idempotencyEnabled: nodeIdempotencyByActor.get(targetActorId) === true,
+          ...(typeof params.budgetUsd === "number" ? { budgetUsd: params.budgetUsd } : {}),
+        });
+        vowels.push(channel);
+        channels.push(channel);
       }
     }
   }
 
-  // The workflow store has no explicit edge model; this inferred chain is a documented approximation.
-  for (let index = 0; index < workflow.nodes.length - 1; index++) {
-    const source = workflow.nodes[index];
-    const target = workflow.nodes[index + 1];
-    if (!source || !target) continue;
+  const hasExplicitEdges = workflow.nodes.some((n) => Array.isArray(n.outboundEdges) && n.outboundEdges.length > 0);
+  const candidatePerturbations: CompiledAlphabetGraph["candidatePerturbations"] = [];
+  const nodeIndexByTarget = new Map<string, number>();
+  for (const node of workflow.nodes) {
+    nodeIndexByTarget.set(`actor-${node.index}`, node.index);
+    for (const [substrateIndex, substrate] of node.substrates.entries()) {
+      nodeIndexByTarget.set(`vowel-${node.index}-${substrateIndex + 1}`, node.index);
+    }
+  }
+
+  for (const node of workflow.nodes) {
+    if (!Array.isArray(node.consonants)) continue;
+    const nodeVowels = vowels.filter((vowel) => vowel.actorId === `actor-${node.index}`);
+    for (const consonantAssignment of node.consonants) {
+      const canonical = normalizeConsonantAlias(consonantAssignment);
+      if (!canonical) continue;
+      const legalTargetIds = nodeVowels
+        .filter((vowel) => {
+          if (canonical.kind === "DELAY") return vowel.kind === "CHANNEL" || vowel.kind === "LOG";
+          if (canonical.kind === "SEVER") return vowel.kind === "CHANNEL";
+          if (canonical.kind === "DUPLICATE") return vowel.kind === "CHANNEL" || vowel.kind === "LOG";
+          if (canonical.kind === "SATURATE") return vowel.kind === "LEASE" || vowel.kind === "LOG";
+          if (canonical.kind === "WIPE") return vowel.kind === "CELL" || vowel.kind === "LEASE";
+          if (canonical.kind === "CORRUPT") return vowel.kind === "CHANNEL" || vowel.kind === "LOG";
+          return false;
+        })
+        .map((vowel) => vowel.id);
+      candidatePerturbations.push({
+        consonant: canonical,
+        targetId: legalTargetIds[0] ?? `actor-${node.index}`,
+        description: legalTargetIds[0] ? `pinned to ${node.nodeName}` : `no legal target on ${node.nodeName}; pinned to actor`,
+      });
+    }
+  }
+
+  let edges: { source: Workflow["nodes"][number]; target: Workflow["nodes"][number] }[] = [];
+  if (hasExplicitEdges) {
+    const byName = new Map(workflow.nodes.map((node) => [node.nodeName, node]));
+    for (const source of workflow.nodes) {
+      if (!Array.isArray(source.outboundEdges)) continue;
+      for (const targetName of source.outboundEdges) {
+        const target = byName.get(targetName);
+        if (!target) {
+          throw new Error(`workflowToGraph: node '${source.nodeName}' has outboundEdge to unknown target '${targetName}'`);
+        }
+        edges.push({ source, target });
+      }
+    }
+  } else {
+    for (let index = 0; index < workflow.nodes.length - 1; index++) {
+      const source = workflow.nodes[index];
+      const target = workflow.nodes[index + 1];
+      if (!source || !target) continue;
+      edges.push({ source, target });
+    }
+  }
+
+  for (const { source, target } of edges) {
     const channel = new Channel({
       id: `channel-${source.index}-${target.index}`,
       sourceActorId: `actor-${source.index}`,
       targetActorId: `actor-${target.index}`,
       timeoutMs: 10_000,
+      idempotencyEnabled: nodeIdempotencyByActor.get(`actor-${target.index}`) === true,
     });
     channels.push(channel);
     vowels.push(channel);
   }
+
+  candidatePerturbations.sort((left, right) => {
+    const leftIndex = nodeIndexByTarget.get(left.targetId) ?? Number.MAX_SAFE_INTEGER;
+    const rightIndex = nodeIndexByTarget.get(right.targetId) ?? Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+    return left.consonant.kind.localeCompare(right.consonant.kind);
+  });
 
   return {
     actors,
     vowels,
     channels,
     contracts: [],
-    candidatePerturbations: [],
-    epistemicStatus: ["INFERRED"],
-    unrepresentableSemantics: ["Workflow dependencies are approximated as a sequential chain because the workflow store has no edge model."],
+    candidatePerturbations,
+    epistemicStatus: hasExplicitEdges ? ["OBSERVED"] : ["INFERRED"],
+    unrepresentableSemantics: hasExplicitEdges ? [] : ["Workflow dependencies are approximated as a sequential chain because the workflow store has no edge model."],
   };
 }
 
@@ -332,5 +426,6 @@ export const causalAuditTool: McpTool = {
 };
 
 export const tool = causalAuditTool;
+export const auditWorkflowReliabilityTool = causalAuditTool;
 export default causalAuditTool;
 

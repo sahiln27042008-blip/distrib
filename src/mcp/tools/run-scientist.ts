@@ -48,6 +48,8 @@ export const runScientistTool = {
       const result = await runScientist(scientistConfig);
       return {
         success: true,
+        status: result.status,
+        inconclusiveReasons: result.inconclusiveReasons,
         experimentsRun: result.experimentsRun,
         hypothesesGenerated: result.hypothesesGenerated,
         discoveredFailures: result.discoveredFailures.length,

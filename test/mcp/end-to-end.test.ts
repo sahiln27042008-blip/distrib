@@ -50,6 +50,8 @@ test("Full loop: describe -> run -> audit -> explain -> propose -> verify works 
   assert.ok(rawFindings.length > 0, "Step 3 must return at least one finding");
 
   // The refund scenario on C5/F1 corresponds to R04 network idempotency
+  const firstSpan = trace.spans[0];
+  assert.ok(firstSpan, "trace should contain at least one span");
   const r04Finding = rawFindings.find((f) => f.rule_id === "r04-network-idempotency") || {
     rule_id: "r04-network-idempotency",
     pillar: "network-idempotency",
@@ -57,7 +59,7 @@ test("Full loop: describe -> run -> audit -> explain -> propose -> verify works 
     severity: "critical",
     message: "External refund side effect retried without idempotency key causing double-charge",
     evidence: {
-      span_ids: [trace.spans[0].spanId],
+      span_ids: [firstSpan.spanId],
     },
     repro: "Run refund agent on C5 legacy ERP without idempotency keys",
     suggested_fix: "Use idempotent endpoint (C1)",

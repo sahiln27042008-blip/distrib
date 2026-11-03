@@ -1,49 +1,40 @@
 // src/scientist/hypothesis-generator.ts
 
 import type { Orchestrator } from "../llm/orchestrator.ts";
-import { createOrchestrator } from "../llm/orchestrator.ts";
-import type { Actor, Contract } from "../world-model/index.ts";
+import { createOrchestrator } from "../llm/meta-client.ts";
 import { buildWorldModel } from "../world-model/adapters.ts";
 import type { MatrixConfig } from "../matrix-copy.ts";
-import type { FailureHypothesis } from "./types.ts";
+import type { FailureHypothesis, ScientistModelExchange } from "./types.ts";
 import { composeSequence, INTERVENTIONS } from "../interventions/index.ts";
 import type { InterventionSequence } from "../interventions/composer.ts";
 import type { Intervention } from "../interventions/primitives.ts";
 
-const HYPOTHESIS_PROMPT = `You are an AI reliability scientist.
-Your job is to find ways to make an autonomous AI system violate
-its reliability invariants.
+const HYPOTHESIS_PROMPT = `You are an AI reliability scientist testing an abstract deterministic simulator. Use only the actors, contracts, invariants, configuration, and interventions provided by the user. Do not invent real vendors, services, tool actions, or intervention names.
 
-You are given:
-- A world model (actors with contracts)
-- The system's invariants (what must hold)
-- The system's current configuration
+Return only a JSON array containing exactly one hypothesis for the single next experiment. That object must contain exactly these fields:
+{
+  "description": "A falsifiable failure hypothesis grounded in the supplied world model",
+  "rationale": "How this experiment distinguishes competing explanations",
+  "expectedInvariant": "An exact invariant ID from the user's list",
+  "interventions": ["one or more exact intervention keys from the user's list"],
+  "confidence": 0.0
+}
 
-Generate failure hypotheses. For each:
-1. Describe the failure scenario
-2. Which interventions would trigger it
-3. Which invariant would be violated
-4. How confident you are (0-1)
-
-Think about:
-- Lost responses after committed operations
-- Worker restarts losing in-memory state
-- Retries without idempotency keys
-- Partial failures in batch operations
-- Saga compensation ordering violations
-- Budget exhaustion from retry storms
-- Context bloat causing hallucination
-
-Return JSON array of hypotheses.`;
+The JSON field names and values are case-sensitive. Interventions must be strings containing exact keys, not prose, objects, or action descriptions. Do not add markdown fences or any surrounding text.`;
 
 export async function generateHypotheses(
   config: MatrixConfig,
   invariants: string[],
   budget: number,
+  orchestratorOverride?: Orchestrator,
+  onModelExchange?: (exchange: ScientistModelExchange) => void,
+  priorEvidence: string[] = [],
+  systemDescription?: string,
+  includeConfiguration = true,
 ): Promise<FailureHypothesis[]> {
   const { actors } = buildWorldModel(config);
 
-  const orchestrator = createOrchestrator();
+  const orchestrator = orchestratorOverride || createOrchestrator();
 
   const worldModelJson = JSON.stringify(
     {
@@ -53,14 +44,21 @@ export async function generateHypotheses(
         contract: a.contract,
       })),
       invariants,
-      config: {
-        A: config.A,
-        B: config.B,
-        C: config.C,
-        D: config.D,
-        E: config.E,
-        F: config.F,
-      },
+      availableInterventions: Object.entries(INTERVENTIONS).map(([key, intervention]) => ({
+        key,
+        description: intervention.description,
+      })),
+      systemDescription: systemDescription ?? "(not provided)",
+      ...(includeConfiguration ? {
+        config: {
+          A: config.A,
+          B: config.B,
+          C: config.C,
+          D: config.D,
+          E: config.E,
+          F: config.F,
+        },
+      } : {}),
     },
     null,
     2,
@@ -70,11 +68,28 @@ export async function generateHypotheses(
     { role: "system" as const, content: HYPOTHESIS_PROMPT },
     {
       role: "user" as const,
-      content: `Generate up to ${budget} failure hypotheses for this system:\n\n${worldModelJson}`,
+      content: `System description:\n${systemDescription ?? "(not provided)"}\n\nPrior experiment evidence (use it to update or reject hypotheses; do not repeat a tested experiment):\n${priorEvidence.length ? priorEvidence.join("\n") : "No experiments have run yet."}\n\nGenerate up to ${budget} falsifiable next failure hypotheses for this system:\n\n${worldModelJson}`,
     },
   ];
 
-  const response = await orchestrator.chat(messages, []);
+  const startedAt = performance.now();
+  let response;
+  try {
+    response = await orchestrator.chat(messages, []);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    onModelExchange?.({
+      messages,
+      response: { error: message },
+      durationMs: performance.now() - startedAt,
+    });
+    throw error;
+  }
+  onModelExchange?.({ messages, response, durationMs: performance.now() - startedAt });
+
+  if (response.tool_calls?.length) {
+    throw new Error(`Model returned unsupported tool call '${response.tool_calls[0]?.name ?? "unknown"}' instead of a hypothesis`);
+  }
 
   // Parse hypotheses from LLM response
   // Mock returns canned hypotheses based on config
@@ -88,119 +103,61 @@ function parseHypotheses(
   invariants: string[],
   budget?: number,
 ): FailureHypothesis[] {
-  let rawHypotheses: any[] = [];
-  try {
-    if (response.tool_calls && response.tool_calls.length > 0) {
-      rawHypotheses =
-        (response.tool_calls[0].arguments as any)?.hypotheses || [];
-    } else if (response.text) {
-      const parsed = JSON.parse(response.text);
-      rawHypotheses = Array.isArray(parsed) ? parsed : [parsed];
+  let rawHypotheses: any[];
+  if (response.tool_calls && response.tool_calls.length > 0) {
+    rawHypotheses = (response.tool_calls[0].arguments as any)?.hypotheses;
+  } else if (response.text?.trim()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.text);
+    } catch {
+      throw new Error("Model returned malformed hypothesis output");
     }
-  } catch {
-    rawHypotheses = getCannedHypotheses(config, invariants);
+    rawHypotheses = Array.isArray(parsed) ? parsed : [parsed];
+  } else {
+    throw new Error("Model response contained no hypotheses");
   }
 
-  if (!rawHypotheses || rawHypotheses.length === 0) {
-    rawHypotheses = getCannedHypotheses(config, invariants);
+  if (!Array.isArray(rawHypotheses) || rawHypotheses.length === 0) {
+    throw new Error("No hypotheses were generated by the model");
   }
 
-  const translated = rawHypotheses.map((h: any, i: number) =>
-    translateHypothesis(h, i, config, invariants),
-  );
+  if (rawHypotheses.length !== 1) {
+    throw new Error("Model must return exactly one hypothesis for the next experiment");
+  }
+
+  const translated = rawHypotheses.map((h: any, i: number) => {
+    if (!h || typeof h !== "object" || typeof h.description !== "string") {
+      throw new Error(`Model hypothesis ${i + 1} is malformed`);
+    }
+    const allowedFields = new Set(["description", "rationale", "expectedInvariant", "interventions", "confidence"]);
+    if (Object.keys(h).some((field) => !allowedFields.has(field))) {
+      throw new Error(`Model hypothesis ${i + 1} contains unsupported fields`);
+    }
+    if (typeof h.expectedInvariant !== "string" || !invariants.includes(h.expectedInvariant)) {
+      throw new Error(`Model hypothesis ${i + 1} references an unrequested invariant`);
+    }
+    if (typeof h.rationale !== "string" || h.rationale.trim().length === 0) {
+      throw new Error(`Model hypothesis ${i + 1} must explain why its experiment distinguishes competing hypotheses`);
+    }
+    if (!Array.isArray(h.interventions) || h.interventions.length === 0) {
+      throw new Error(`Model hypothesis ${i + 1} has no interventions`);
+    }
+    const unknownInterventions = h.interventions.filter(
+      (key: unknown) => typeof key !== "string" || !Object.hasOwn(INTERVENTIONS, key),
+    );
+    if (unknownInterventions.length > 0) {
+      throw new Error(`Model hypothesis ${i + 1} contains unsupported interventions`);
+    }
+    if (typeof h.confidence !== "number" || !Number.isFinite(h.confidence) || h.confidence < 0 || h.confidence > 1) {
+      throw new Error(`Model hypothesis ${i + 1} confidence must be between 0 and 1`);
+    }
+    return translateHypothesis(h, i, config, invariants);
+  });
 
   return typeof budget === "number" && budget > 0
     ? translated.slice(0, budget)
     : translated;
-}
-
-function getCannedHypotheses(
-  config: MatrixConfig,
-  invariants: string[],
-): any[] {
-  const hypotheses: any[] = [];
-
-  // If C5 or C2 (unreliable or legacy payment) and r04 is tracked, hypothesize duplicate charge
-  if (
-    (config.C === "C5_legacy_erp_no_idem" ||
-      config.C === "C2_socket_drop_2ms_late") &&
-    invariants.includes("r04-network-idempotency")
-  ) {
-    hypotheses.push({
-      description:
-        "Payment committed but response lost. Worker restarts. Agent retries without idempotency key. Duplicate charge.",
-      interventions: [
-        "missing_idempotency_key",
-        "drop_response",
-        "kill_worker",
-        "duplicate_request",
-      ],
-      expectedInvariant: "r04-network-idempotency",
-      confidence: 0.9,
-    });
-  }
-
-  // If F1 (blind retry), hypothesize budget burn
-  if (
-    config.F === "F1_blind_retry_unbounded_spend" &&
-    invariants.includes("r10-unit-economics")
-  ) {
-    hypotheses.push({
-      description:
-        "Retry storm with no budget envelope. Each retry burns tokens. Cost exceeds ticket value.",
-      interventions: [
-        "missing_idempotency_key",
-        "rate_limit",
-        "duplicate_request",
-      ],
-      expectedInvariant: "r10-unit-economics",
-      confidence: 0.7,
-    });
-  }
-
-  // If E1 (god mode), hypothesize host crash
-  if (
-    config.E === "E1_god_mode_main_thread" &&
-    (invariants.includes("r05-distributed-sagas") || invariants.length === 0)
-  ) {
-    hypotheses.push({
-      description:
-        "Tool SIGSEGV on main thread. Host crashes. All active sessions severed.",
-      interventions: ["kill_worker"],
-      expectedInvariant: "r05-distributed-sagas",
-      confidence: 0.8,
-    });
-  }
-
-  // If B3 (write amp), hypothesize storage exhaustion
-  if (
-    config.B === "B3_write_amp_15mb" &&
-    (invariants.includes("r11") || invariants.includes("r11-event-compaction"))
-  ) {
-    hypotheses.push({
-      description:
-        "15MB state writes saturate storage IOPS. Primary storage bloats. Query performance degrades.",
-      interventions: ["write_amplification"],
-      expectedInvariant: "r11",
-      confidence: 0.6,
-    });
-  }
-
-  // Always hypothesize saga orphan if not resilient
-  if (
-    config.F !== "F3_resilient_invariant_runtime" &&
-    invariants.includes("r05-distributed-sagas")
-  ) {
-    hypotheses.push({
-      description:
-        "Saga partially completes. Worker loses state before compensation. Orphaned cloud resource left running.",
-      interventions: ["partial_failure", "lose_state"],
-      expectedInvariant: "r05-distributed-sagas",
-      confidence: 0.75,
-    });
-  }
-
-  return hypotheses;
 }
 
 function translateHypothesis(
@@ -223,6 +180,7 @@ function translateHypothesis(
   return {
     id: `hyp-${index + 1}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     description: raw.description || "Unknown",
+    experimentRationale: raw.rationale,
     interventionSequence: sequence,
     expectedInvariant:
       raw.expectedInvariant || invariants[0] || "unknown",

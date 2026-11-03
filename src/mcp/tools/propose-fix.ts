@@ -107,6 +107,9 @@ function getCannedFixForFinding(finding: Finding, original: MatrixConfig): Parti
   if (ruleId.includes("r04") || ruleId.includes("idempotency")) {
     // R04: network idempotency failure - fix dial C (replace C5 with C1)
     fixes.C = "C1_clean_20ms";
+  } else if (ruleId.includes("r08") || ruleId.includes("zero_hold") || ruleId.includes("zero-hold") || ruleId.includes("lease")) {
+    // R08: zero hold lease - fix dial B (replace hold modes with B1_zero_hold_2ms)
+    fixes.B = "B1_zero_hold_2ms";
   } else if (ruleId.includes("r11") || ruleId.includes("compaction") || ruleId.includes("write")) {
     // R11: event compaction / write amplification - fix dial B (replace B3 with B1)
     fixes.B = "B1_zero_hold_2ms";
@@ -119,7 +122,7 @@ function getCannedFixForFinding(finding: Finding, original: MatrixConfig): Parti
     if (original.C === "C5_legacy_erp_no_idem") {
       fixes.C = "C1_clean_20ms";
     }
-    if (original.B === "B3_write_amp_15mb") {
+    if (original.B === "B3_write_amp_15mb" || original.B === "B2_stream_hog_30s") {
       fixes.B = "B1_zero_hold_2ms";
     }
     if (original.F === "F1_blind_retry_unbounded_spend") {
@@ -130,40 +133,101 @@ function getCannedFixForFinding(finding: Finding, original: MatrixConfig): Parti
   return fixes;
 }
 
+export const PROPOSE_FIX_SCHEMA = {
+  type: "object",
+  properties: {
+    finding: {
+      type: "object",
+      description: "Finding from audit_trace (optional; inferred from session memory if omitted)",
+      properties: {
+        rule_id: { type: "string" },
+        pillar: { type: "string" },
+        status: { type: "string" },
+      },
+    },
+    explanation: {
+      type: "string",
+      description: "Root-cause explanation from explain_finding",
+    },
+    originalConfig: {
+      type: "object",
+      description: "MatrixConfig that produced the finding (optional; inferred from session memory if omitted)",
+      properties: {
+        A: Array.from(VALID_A),
+        B: Array.from(VALID_B),
+        C: Array.from(VALID_C),
+        D: Array.from(VALID_D),
+        E: Array.from(VALID_E),
+        F: Array.from(VALID_F),
+      },
+    },
+    systemDescription: {
+      type: "string",
+      description: "User's original system description",
+    },
+  },
+  required: [],
+};
+
 export const proposeFixTool: McpTool = {
   name: "propose_fix",
   description:
     "Propose a fixed MatrixConfig that should make the given finding disappear when the matrix re-runs. Changes only the dials that need to change; leaves the rest identical to the original.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      finding: {
-        type: "object",
-        description: "Finding from audit_trace",
-      },
-      explanation: {
-        type: "string",
-        description: "Root-cause explanation from explain_finding",
-      },
-      originalConfig: {
-        type: "object",
-        description: "MatrixConfig that produced the finding",
-      },
-      systemDescription: {
-        type: "string",
-        description: "User's original system description",
-      },
-    },
-    required: ["finding", "originalConfig"],
-  },
+  inputSchema: PROPOSE_FIX_SCHEMA as any,
   async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
-    const finding = args.finding as Finding | undefined;
+    let finding = args.finding as Finding | undefined;
     const explanation = args.explanation as string | undefined;
-    const originalConfig = args.originalConfig as MatrixConfig | undefined;
+    let originalConfig = args.originalConfig as MatrixConfig | undefined;
     const systemDescription = args.systemDescription as string | undefined;
 
+    // 1. Resolve finding and rule_id from session memory or active trace if omitted
+    const ctx = context as any;
     if (!finding || !finding.rule_id) {
-      return { success: false, error: "finding with rule_id is required" };
+      if (ctx?.lastFailedFinding?.rule_id) {
+        finding = { ...ctx.lastFailedFinding, ...(finding || {}) };
+      } else if (ctx?.lastFinding?.rule_id) {
+        finding = { ...ctx.lastFinding, ...(finding || {}) };
+      } else if (Array.isArray(ctx?.lastFindings) && ctx.lastFindings.length > 0) {
+        const proven = ctx.lastFindings.find((f: any) => f.status === "proven" && f.rule_id);
+        finding = { ...(proven || ctx.lastFindings[0]), ...(finding || {}) };
+      } else if (Array.isArray(ctx?.lastViolatedInvariants) && ctx.lastViolatedInvariants.length > 0) {
+        finding = {
+          rule_id: ctx.lastViolatedInvariants[0],
+          status: "proven",
+          ...(finding || {}),
+        };
+      }
+    }
+
+    // 2. Resolve originalConfig from session memory if omitted
+    if (!originalConfig || !originalConfig.A) {
+      if (ctx?.lastConfig?.A) {
+        originalConfig = ctx.lastConfig;
+      } else if (ctx?.lastTrace?.config?.A) {
+        originalConfig = ctx.lastTrace.config;
+      }
+    }
+
+    // If finding has no rule_id, infer from originalConfig if present
+    if (finding && !finding.rule_id && originalConfig) {
+      if (originalConfig.C === "C5_legacy_erp_no_idem") {
+        finding.rule_id = "r04-network-idempotency";
+      } else if (originalConfig.B === "B3_write_amp_15mb" || originalConfig.B === "B2_stream_hog_30s") {
+        finding.rule_id = "r08-zero-hold-lease";
+      } else if (originalConfig.F === "F1_blind_retry_unbounded_spend") {
+        finding.rule_id = "r10-unit-economics";
+      } else {
+        finding.rule_id = "r04-network-idempotency";
+      }
+    }
+
+    if (!finding || !finding.rule_id) {
+      return {
+        success: false,
+        validationError: true,
+        error: "finding with rule_id is required",
+        expectedSchema: PROPOSE_FIX_SCHEMA,
+      };
     }
     if (
       !originalConfig ||
@@ -174,7 +238,32 @@ export const proposeFixTool: McpTool = {
       !originalConfig.E ||
       !originalConfig.F
     ) {
-      return { success: false, error: "originalConfig with dials is required" };
+      return {
+        success: false,
+        validationError: true,
+        error: "originalConfig with dials is required",
+        expectedSchema: PROPOSE_FIX_SCHEMA,
+      };
+    }
+
+    // Validate dials strictly match allowed enums before running the solver
+    if (!VALID_A.has(originalConfig.A)) {
+      return { success: false, validationError: true, error: `Invalid Dial A in originalConfig: ${originalConfig.A}`, expectedSchema: PROPOSE_FIX_SCHEMA };
+    }
+    if (!VALID_B.has(originalConfig.B)) {
+      return { success: false, validationError: true, error: `Invalid Dial B in originalConfig: ${originalConfig.B}`, expectedSchema: PROPOSE_FIX_SCHEMA };
+    }
+    if (!VALID_C.has(originalConfig.C)) {
+      return { success: false, validationError: true, error: `Invalid Dial C in originalConfig: ${originalConfig.C}`, expectedSchema: PROPOSE_FIX_SCHEMA };
+    }
+    if (!VALID_D.has(originalConfig.D)) {
+      return { success: false, validationError: true, error: `Invalid Dial D in originalConfig: ${originalConfig.D}`, expectedSchema: PROPOSE_FIX_SCHEMA };
+    }
+    if (!VALID_E.has(originalConfig.E)) {
+      return { success: false, validationError: true, error: `Invalid Dial E in originalConfig: ${originalConfig.E}`, expectedSchema: PROPOSE_FIX_SCHEMA };
+    }
+    if (!VALID_F.has(originalConfig.F)) {
+      return { success: false, validationError: true, error: `Invalid Dial F in originalConfig: ${originalConfig.F}`, expectedSchema: PROPOSE_FIX_SCHEMA };
     }
 
     const orchestrator = context?.orchestrator || createOrchestrator();

@@ -68,7 +68,7 @@ function httpRequest(
   });
 }
 
-test("tools/list returns 10 tools including run_gate", async () => {
+test("tools/list returns 12 tools including run_gate", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -89,7 +89,7 @@ test("tools/list returns 10 tools including run_gate", async () => {
     assert.equal(listRes.statusCode, 200);
     const tools = listRes.body.tools || listRes.body.result?.tools;
     assert.ok(Array.isArray(tools));
-    assert.equal(tools.length, 10);
+    assert.equal(tools.length, 12);
 
     const names = tools.map((t: any) => t.name);
     assert.ok(names.includes("describe_system"));

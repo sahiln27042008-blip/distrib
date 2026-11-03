@@ -47,6 +47,7 @@ export function applyDelay(
     );
 
     if (opts.heldLease && opts.heldLease.heldDuringExternalChannel) {
+      opts.heldLease.expire(sim.now, sim);
       opts.heldLease.release(target.sourceActorId, sim.now, sim);
     }
 

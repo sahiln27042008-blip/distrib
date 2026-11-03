@@ -69,7 +69,7 @@ function httpRequest(
   });
 }
 
-test("tools/list returns 13 tools including audit_workflow_reliability, sweep_latency_cliff, verify_architecture_patch", async () => {
+test("tools/list returns 15 tools including causal and workflow tools", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -90,7 +90,7 @@ test("tools/list returns 13 tools including audit_workflow_reliability, sweep_la
     assert.equal(listRes.statusCode, 200);
     const tools = listRes.body.tools || listRes.body.result?.tools;
     assert.ok(Array.isArray(tools));
-    assert.equal(tools.length, 13);
+    assert.equal(tools.length, 15);
 
     const names = tools.map((t: any) => t.name);
     // 10 baseline tools
@@ -150,7 +150,7 @@ test("tools/call with audit_workflow_reliability returns APPROVED or BLOCKED ver
     const shortestDepth = callResFailing.body.shortestDepth ?? callResFailing.body.result?.shortestDepth;
     assert.equal(shortestDepth, 1);
 
-    // Call with safe scenario (scenario-B)
+    // Scenario-B includes an un-idempotent post-commit retry in the explored fault set.
     const callResSafe = await httpRequest(mcp.port, {
       method: "POST",
       path: "/tools/call",
@@ -169,8 +169,8 @@ test("tools/call with audit_workflow_reliability returns APPROVED or BLOCKED ver
     const successSafe = callResSafe.body.success ?? callResSafe.body.result?.success;
     assert.equal(successSafe, true);
 
-    const verdictSafe = callResSafe.body.verdict ?? callResSafe.body.result?.verdict;
-    assert.equal(verdictSafe, "APPROVED");
+    const verdictScenarioB = callResSafe.body.verdict ?? callResSafe.body.result?.verdict;
+    assert.equal(verdictScenarioB, "BLOCKED");
   } finally {
     await mcp.close();
   }
@@ -223,7 +223,7 @@ test("tools/call with sweep_latency_cliff returns cliff threshold", async () => 
   }
 });
 
-test("tools/call with verify_architecture_patch returns APPROVED when ablation fixes the failure", async () => {
+test("tools/call with verify_architecture_patch reports independent lease expiry after idempotency ablation", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -253,13 +253,13 @@ test("tools/call with verify_architecture_patch returns APPROVED when ablation f
     assert.equal(success, true);
 
     const verdict = callRes.body.verdict ?? callRes.body.result?.verdict;
-    assert.equal(verdict, "APPROVED");
+    assert.equal(verdict, "BLOCKED");
 
-    const immuneUpToDepth = callRes.body.immuneUpToDepth ?? callRes.body.result?.immuneUpToDepth;
-    assert.equal(immuneUpToDepth, 2);
+    const violatedInvariants = callRes.body.violatedInvariants ?? callRes.body.result?.violatedInvariants;
+    assert.ok(violatedInvariants.includes("native-lease-epoch-expiry"));
 
     const regressionCheck = callRes.body.regressionCheck ?? callRes.body.result?.regressionCheck;
-    assert.equal(regressionCheck, "PASSED");
+    assert.equal(regressionCheck, "FAILED");
   } finally {
     await mcp.close();
   }

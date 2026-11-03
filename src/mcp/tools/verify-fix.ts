@@ -251,7 +251,11 @@ export const verifyFixTool: McpTool = {
         };
       }
 
-      const isFixed = originalMatchingFindings.length > 0 && fixedMatchingFindings.length === 0;
+        const sameSeed = originalConfig.seed === fixedConfig.seed;
+        const isFixed =
+          originalMatchingFindings.length > 0 &&
+          fixedMatchingFindings.length === 0 &&
+          sameSeed;
 
       return {
         success: true,
@@ -269,7 +273,9 @@ export const verifyFixTool: McpTool = {
         },
         proof: isFixed
           ? `Original had ${originalMatchingFindings.length} proven ${findingRuleId} finding(s); fixed config has 0. Fix verified.`
-          : `Original had ${originalMatchingFindings.length}; fixed still has ${fixedMatchingFindings.length}. Fix did NOT resolve the finding.`,
+            : !sameSeed
+              ? `Seed mismatch: original used ${originalConfig.seed}, fixed used ${fixedConfig.seed}. Fix was not verified.`
+              : `Original had ${originalMatchingFindings.length}; fixed still has ${fixedMatchingFindings.length}. Fix did NOT resolve the finding.`,
       };
     } catch (err: any) {
       return { success: false, error: `Execution error during verify_fix: ${err.message || String(err)}` };

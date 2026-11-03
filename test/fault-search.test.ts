@@ -6,14 +6,48 @@ import assert from "node:assert/strict";
 import { AlphabetCompiler } from "../src/physics/alphabet/compiler.ts";
 import { Channel, type ChannelConfig, type ChannelSendOpts, type ChannelSendResult } from "../src/physics/alphabet/vowels/channel.ts";
 import { Cell } from "../src/physics/alphabet/vowels/cell.ts";
+import { Lease } from "../src/physics/alphabet/vowels/lease.ts";
 import type { CompiledAlphabetGraph } from "../src/physics/alphabet/types.ts";
 import type { Sim } from "../src/kernel.ts";
 import {
   searchFaults,
+  enumerateFaults,
   findCollapseCliff,
   executeFaultSequence,
   type ConsonantFault,
 } from "../src/physics/search/index.ts";
+import { resolveScenario } from "../src/mcp/tools/causal-audit.ts";
+
+test("pinned perturbations are enumerated before generic defaults", () => {
+  const lease = new Lease({
+    id: "lease-pinned",
+    actorId: "actor-service",
+    maxCapacity: 1,
+    ttlMs: 1000,
+    overflowPolicy: "WAIT_TIMEOUT",
+  });
+  const channel = new Channel({
+    id: "channel-default",
+    sourceActorId: "actor-client",
+    targetActorId: "actor-service",
+    timeoutMs: 1000,
+  });
+  const graph: CompiledAlphabetGraph = {
+    actors: [{ id: "actor-client", name: "Client" }, { id: "actor-service", name: "Service" }],
+    vowels: [lease, channel],
+    channels: [channel],
+    contracts: [],
+    candidatePerturbations: [{ consonant: { kind: "SATURATE", loadUnits: 1 }, targetId: lease.id }],
+    epistemicStatus: ["OBSERVED"],
+    unrepresentableSemantics: [],
+  };
+
+  assert.deepEqual(enumerateFaults(graph)[0], {
+    consonantKind: "SATURATE",
+    targetVowelId: lease.id,
+    params: { loadUnits: 1 },
+  });
+});
 
 test("Test 1: Single-fault discovery via IDDFS (depth 1)", async () => {
   const compiler = new AlphabetCompiler();
@@ -116,6 +150,74 @@ test("Test 2: Two-fault interaction (SEVER alone succeeds, WIPE alone succeeds, 
   assert.equal(searchRes.minimalCounterexample.length, 2);
 });
 
+test("executor emits lease expiry when a delayed channel outlives its held lease", async () => {
+  const lease = new Lease({
+    id: "lease-source",
+    actorId: "actor-client",
+    maxCapacity: 1,
+    ttlMs: 20,
+    overflowPolicy: "WAIT_TIMEOUT",
+    heldDuringExternalChannel: true,
+  });
+  const channel = new Channel({
+    id: "channel-delayed",
+    sourceActorId: "actor-client",
+    targetActorId: "actor-service",
+    timeoutMs: 100,
+  });
+  const graph: CompiledAlphabetGraph = {
+    actors: [{ id: "actor-client", name: "Client" }, { id: "actor-service", name: "Service" }],
+    vowels: [lease, channel],
+    channels: [channel],
+    contracts: [],
+    candidatePerturbations: [],
+    epistemicStatus: ["OBSERVED"],
+    unrepresentableSemantics: [],
+  };
+
+  const execution = await executeFaultSequence(graph, [{
+    consonantKind: "DELAY",
+    targetVowelId: channel.id,
+    params: { durationMs: 50 },
+  }], 42);
+
+  assert.ok(execution.events.some((event) => event.kind === "lease.epoch_expired"));
+});
+
+test("executor emits cascade evidence when a channel targets a saturated lease", async () => {
+  const lease = new Lease({
+    id: "lease-target",
+    actorId: "actor-service",
+    maxCapacity: 1,
+    ttlMs: 5000,
+    overflowPolicy: "WAIT_TIMEOUT",
+  });
+  const channel = new Channel({
+    id: "channel-to-saturated-service",
+    sourceActorId: "actor-client",
+    targetActorId: "actor-service",
+    timeoutMs: 100,
+  });
+  const graph: CompiledAlphabetGraph = {
+    actors: [{ id: "actor-client", name: "Client" }, { id: "actor-service", name: "Service" }],
+    vowels: [lease, channel],
+    channels: [channel],
+    contracts: [],
+    candidatePerturbations: [],
+    epistemicStatus: ["OBSERVED"],
+    unrepresentableSemantics: [],
+  };
+
+  const execution = await executeFaultSequence(graph, [{
+    consonantKind: "SATURATE",
+    targetVowelId: lease.id,
+    params: { loadUnits: 1 },
+  }], 42);
+
+  assert.ok(execution.events.some((event) => event.kind === "channel.cascade_failure"));
+  assert.ok(!execution.events.some((event) => event.kind === "channel.send"));
+});
+
 test("Test 3: Cliff detection on parameterized delay (timeoutMs = 30000)", async () => {
   const cell = new Cell({
     id: "cell-target-unidem",
@@ -175,6 +277,82 @@ test("Test 3: Cliff detection on parameterized delay (timeoutMs = 30000)", async
     cliff.upperFailureBound - cliff.lowerSafeBound <= cliff.tolerance,
     "Interval width must be within tolerance",
   );
+  assert.ok(cliff.testedRange.low <= cliff.lowerSafeBound);
+  assert.ok(cliff.upperFailureBound <= cliff.testedRange.high);
+  assert.deepEqual(cliff.testedRange, { low: 0, high: 60000 });
+});
+
+test("Cliff search rejects malformed ranges and iteration budgets", async () => {
+  const graph = resolveScenario("timeout-cliff")!.buildGraph();
+  const parameter = {
+    name: "durationMs",
+    targetVowelId: "chan-timeout-cliff",
+    consonantKind: "DELAY" as const,
+    paramKey: "durationMs",
+  };
+
+  await assert.rejects(
+    () => findCollapseCliff(graph, parameter, { low: Number.NaN, high: 100, tolerance: 1 }, 42),
+    /integer 0 <= low < high/i,
+  );
+  await assert.rejects(
+    () => findCollapseCliff(graph, parameter, { low: 0, high: Number.POSITIVE_INFINITY, tolerance: 1 }, 42),
+    /integer 0 <= low < high/i,
+  );
+  await assert.rejects(
+    () => findCollapseCliff(graph, parameter, { low: 0, high: 100, tolerance: 0 }, 42),
+    /positive finite tolerance/i,
+  );
+  await assert.rejects(
+    () => findCollapseCliff(graph, parameter, { low: 0, high: 100, tolerance: 1, maxIterations: Infinity }, 42),
+    /maxIterations must be a finite integer/i,
+  );
+  await assert.rejects(
+    () => findCollapseCliff(graph, parameter, { low: 0, high: 100, tolerance: 1, maxIterations: 65 }, 42),
+    /between 0 and 64/i,
+  );
+});
+
+test("Cliff search distinguishes no-cliff ranges and reports only tested bounds", async () => {
+  const graph = resolveScenario("timeout-cliff")!.buildGraph();
+  const parameter = {
+    name: "durationMs",
+    targetVowelId: "chan-timeout-cliff",
+    consonantKind: "DELAY" as const,
+    paramKey: "durationMs",
+  };
+
+  const allSafe = await findCollapseCliff(graph, parameter, {
+    low: 0,
+    high: 10000,
+    tolerance: 10,
+  }, 42);
+  assert.equal(allSafe.status, "NO_CLIFF_IN_RANGE");
+  assert.deepEqual(allSafe.testedRange, { low: 0, high: 10000 });
+
+  const allFailing = await findCollapseCliff(graph, parameter, {
+    low: 35000,
+    high: 45000,
+    tolerance: 10,
+  }, 42);
+  assert.equal(allFailing.status, "NO_CLIFF_IN_RANGE");
+  assert.deepEqual(allFailing.testedRange, { low: 35000, high: 45000 });
+
+  const upperBoundarySafe = await findCollapseCliff(graph, parameter, {
+    low: 20000,
+    high: 30000,
+    tolerance: 10,
+  }, 42);
+  assert.equal(upperBoundarySafe.status, "NO_CLIFF_IN_RANGE");
+  assert.equal(upperBoundarySafe.testedRange.high, 30000);
+
+  const lowerBoundaryFailing = await findCollapseCliff(graph, parameter, {
+    low: 30001,
+    high: 40000,
+    tolerance: 10,
+  }, 42);
+  assert.equal(lowerBoundaryFailing.status, "NO_CLIFF_IN_RANGE");
+  assert.equal(lowerBoundaryFailing.testedRange.low, 30001);
 });
 
 test("Test 4: Exhaustive bounded immunity (resilient configuration with maxDepth 2)", async () => {
@@ -266,6 +444,26 @@ test("Test 5: Budget exhaustion halts search and does NOT claim safety", async (
   assert.equal(result.status, "BUDGET_EXHAUSTED");
   assert.notEqual(result.status, "NO_FAILURE_WITHIN_BOUND");
   assert.equal(result.evaluations, 5);
+});
+
+test("Fault search rejects non-finite or unsafe search limits", async () => {
+  const compiler = new AlphabetCompiler();
+  const graph = compiler.compileFromNaturalLanguage(
+    "CFO agent queries Postgres for high-value churned customers, grants credit in Stripe, sends email via SendGrid, alerts Slack"
+  );
+
+  await assert.rejects(
+    () => searchFaults(graph, { maxDepth: 1, maxEvaluations: Number.NaN }, 42),
+    /maxEvaluations must be finite/i,
+  );
+  await assert.rejects(
+    () => searchFaults(graph, { maxDepth: Number.POSITIVE_INFINITY, maxEvaluations: 10 }, 42),
+    /maxDepth must be finite/i,
+  );
+  await assert.rejects(
+    () => searchFaults(graph, { maxDepth: 65, maxEvaluations: 10 }, 42),
+    /maxDepth cannot exceed 64/i,
+  );
 });
 
 test("Test 6: Determinism (identical options + seed produce deep-equal results & fingerprint)", async () => {

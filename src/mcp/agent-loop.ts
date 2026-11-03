@@ -79,6 +79,24 @@ export async function runAgentLoop(opts: {
   const allExecutedToolCalls: ToolCall[] = [];
   let activeWorkflowId: string | undefined;
   let consecutiveToolErrors = 0;
+  let lastToolName = "";
+  let lastArgsSig = "";
+  let consecutiveSameToolCalls = 0;
+
+  function stableStringify(value: unknown): string {
+    if (value === undefined) return "undefined";
+    if (value === null) return "null";
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    }
+    if (typeof value === "object") {
+      return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
+    }
+    return String(value);
+  }
 
   function buildGraphDataResult(text: string, stopReason: AgentLoopResult["stopReason"]): AgentLoopResult {
     let graphData: any = undefined;
@@ -167,17 +185,29 @@ export async function runAgentLoop(opts: {
   }
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
+    if (messages.length > 12) {
+      const system = messages[0];
+      const recent = messages.slice(-8);
+      messages.length = 0;
+      if (system) {
+        messages.push(system);
+      }
+      messages.push({ role: "user", content: "[Previous tool results are summarized. Proceed with the next diagnostic step based on the results you have.]" });
+      messages.push(...recent);
+    }
+
     const isFinalIteration = i === MAX_ITERATIONS - 1;
     const currentTools = isFinalIteration ? [] : toolDefs;
     console.log(`[AGENT_LOOP] Iteration ${i}: calling orchestrator (${messages.length} msgs)...`);
     const response = await orchestrator.chat(messages, currentTools);
-    const resolvedToolCalls = response.tool_calls.map((toolCall) => {
+    const resolvedToolCalls = (response.tool_calls ?? []).flatMap((toolCall) => {
+      if (!toolCall) return [];
       const exactTool = (opts.tools || []).find((tool) => tool.name === toolCall.name);
-      if (exactTool || toolCall.name.length < 5) return toolCall;
+      if (exactTool || toolCall.name.length < 5) return [toolCall];
       const prefixMatches = (opts.tools || []).filter((tool) => tool.name.startsWith(toolCall.name));
       return prefixMatches.length === 1
-        ? { ...toolCall, name: prefixMatches[0]!.name }
-        : toolCall;
+        ? [{ ...toolCall, name: prefixMatches[0]!.name }]
+        : [toolCall];
     });
     console.log(`[AGENT_LOOP] Iteration ${i}: model replied with ${resolvedToolCalls.length} tool calls (${resolvedToolCalls.map(tc => tc.name).join(", ")})`);
 
@@ -201,6 +231,21 @@ export async function runAgentLoop(opts: {
 
     let circuitBroken = false;
     for (const tc of resolvedToolCalls) {
+      const argsSig = stableStringify(tc.arguments ?? {});
+      if (tc.name === lastToolName && argsSig === lastArgsSig) {
+        consecutiveSameToolCalls++;
+        if (consecutiveSameToolCalls >= 3) {
+          return buildGraphDataResult(
+            `I've called ${tc.name} ${consecutiveSameToolCalls} times with the same arguments. The previous results are in the conversation history. I should now move to the next diagnostic step: auditing the trace, explaining findings, and proposing a verified fix.`,
+            "stop",
+          );
+        }
+      } else {
+        consecutiveSameToolCalls = 0;
+      }
+      lastToolName = tc.name;
+      lastArgsSig = argsSig;
+
       if (circuitBroken) {
         messages.push({
           role: "tool",
@@ -236,9 +281,17 @@ export async function runAgentLoop(opts: {
           }
         }
         console.log(`[AGENT_LOOP] Iteration ${i}: executing tool '${tc.name}'...`);
-        const result = await tool.handler(tc.arguments, opts.context);
+        const toolArguments = { ...tc.arguments };
+        if (
+          (tc.name === "audit_trace" || tc.name === "explain_finding") &&
+          opts.context?.lastTrace &&
+          (!toolArguments.trace || !(toolArguments.trace as any).spans)
+        ) {
+          toolArguments.trace = opts.context.lastTrace;
+        }
+        const result = await tool.handler(toolArguments, opts.context);
         console.log(`[AGENT_LOOP] Iteration ${i}: tool '${tc.name}' completed.`);
-        const toolFailed = result && typeof result === "object" && result.success === false;
+        const toolFailed = result && typeof result === "object" && result.success === false && !(result as any).validationError;
         if (tc.name === "create_workflow" && result && typeof result === "object" && result.success !== false) {
           activeWorkflowId = result.workflowId;
           if (activeWorkflowId && opts.context?.sessionId) {
@@ -246,11 +299,33 @@ export async function runAgentLoop(opts: {
           }
         } else if (tc.name === "insert_node" && result && typeof result === "object" && result.success !== false) {
           activeWorkflowId = tc.arguments.workflowId as string | undefined;
+        } else if (tc.name === "audit_trace" && result && typeof result === "object") {
+          if (opts.context) {
+            const findings = (result as any).findings || (Array.isArray(result) ? result : []);
+            (opts.context as any).lastFindings = findings;
+            (opts.context as any).lastFailedFinding = findings.find((f: any) => f.status === "proven");
+            (opts.context as any).lastFinding = (opts.context as any).lastFailedFinding || findings[0];
+          }
+        } else if (tc.name === "audit_workflow_reliability" && result && typeof result === "object") {
+          if (opts.context) {
+            (opts.context as any).lastCausalAudit = result;
+            (opts.context as any).lastViolatedInvariants = (result as any).violatedInvariants;
+            if (Array.isArray((result as any).violatedInvariants) && (result as any).violatedInvariants.length > 0) {
+              (opts.context as any).lastFailedFinding = {
+                rule_id: (result as any).violatedInvariants[0],
+                status: "proven",
+                pillar: "reliability",
+              };
+            }
+          }
         }
         let toolContent = typeof result === "string" ? result : JSON.stringify(result);
         if (tc.name === "run_matrix" && result && typeof result === "object" && result.trace) {
           if (opts.context) {
             (opts.context as any).lastTrace = result.trace;
+            if (result.config) {
+              (opts.context as any).lastConfig = result.config;
+            }
           }
           const compact = {
             success: result.success,

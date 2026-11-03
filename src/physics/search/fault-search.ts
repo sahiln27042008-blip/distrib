@@ -8,6 +8,7 @@ import type {
 import { executeFaultSequence } from "./execute-faults.ts";
 
 const DEFAULT_SEED = 1;
+const MAX_SEARCH_DEPTH = 64;
 
 function faultFromCandidate(candidate: {
   consonant: Consonant;
@@ -21,16 +22,14 @@ function faultFromCandidate(candidate: {
   };
 }
 
-function enumerateFaults(graph: CompiledAlphabetGraph): ConsonantFault[] {
-  if (graph.candidatePerturbations.length > 0) {
-    return graph.candidatePerturbations.map(faultFromCandidate);
-  }
+export function enumerateFaults(graph: CompiledAlphabetGraph): ConsonantFault[] {
+  const explicitCandidates = graph.candidatePerturbations.map(faultFromCandidate);
+  const defaultCandidates: ConsonantFault[] = [];
 
-  const candidates: ConsonantFault[] = [];
   for (const vowel of graph.vowels) {
     switch (vowel.kind) {
       case "CHANNEL":
-        candidates.push(
+        defaultCandidates.push(
           { consonantKind: "DELAY", targetVowelId: vowel.id, params: { durationMs: 1 } },
           { consonantKind: "SEVER", targetVowelId: vowel.id, params: { phase: "PRE_COMMIT" } },
           { consonantKind: "SEVER", targetVowelId: vowel.id, params: { phase: "POST_COMMIT" } },
@@ -42,7 +41,7 @@ function enumerateFaults(graph: CompiledAlphabetGraph): ConsonantFault[] {
         const capacity = "maxCapacity" in vowel && typeof vowel.maxCapacity === "number"
           ? vowel.maxCapacity
           : 1;
-        candidates.push({
+        defaultCandidates.push({
           consonantKind: "SATURATE",
           targetVowelId: vowel.id,
           params: { loadUnits: capacity },
@@ -50,14 +49,14 @@ function enumerateFaults(graph: CompiledAlphabetGraph): ConsonantFault[] {
         break;
       }
       case "LOG":
-        candidates.push(
+        defaultCandidates.push(
           { consonantKind: "DELAY", targetVowelId: vowel.id, params: { durationMs: 1 } },
           { consonantKind: "CORRUPT", targetVowelId: vowel.id, params: { mode: "LOSSY_DROP" } },
         );
         break;
       case "CELL":
         if ("persistence" in vowel && vowel.persistence === "VOLATILE") {
-          candidates.push({
+          defaultCandidates.push({
             consonantKind: "WIPE",
             targetVowelId: vowel.id,
             params: { scope: "VOLATILE_CELLS", cellIds: [vowel.id] },
@@ -66,7 +65,18 @@ function enumerateFaults(graph: CompiledAlphabetGraph): ConsonantFault[] {
         break;
     }
   }
-  return candidates;
+
+  const seen = new Map<string, { fault: ConsonantFault; priority: number }>();
+  for (const [priority, candidates] of [[0, explicitCandidates], [1, defaultCandidates]] as const) {
+    for (const fault of candidates) {
+      const key = faultSortKey(fault);
+      if (!seen.has(key)) seen.set(key, { fault, priority });
+    }
+  }
+
+  return [...seen.values()]
+    .sort((left, right) => left.priority - right.priority || faultSortKey(left.fault).localeCompare(faultSortKey(right.fault)))
+    .map(({ fault }) => fault);
 }
 
 function faultSortKey(fault: ConsonantFault): string {
@@ -98,11 +108,20 @@ export async function searchFaults(
   seed = DEFAULT_SEED,
 ): Promise<FaultSearchResult> {
   const startedAt = performance.now();
-  const maxDepth = Math.max(0, Math.floor(options.maxDepth ?? 3));
-  const maxEvaluations = Math.max(1, Math.floor(options.maxEvaluations ?? 5000));
-  const candidates = enumerateFaults(graph).sort((left, right) =>
-    faultSortKey(left).localeCompare(faultSortKey(right)),
-  );
+  const requestedMaxDepth = options.maxDepth ?? 3;
+  const requestedMaxEvaluations = options.maxEvaluations ?? 5000;
+  if (!Number.isFinite(requestedMaxDepth)) {
+    throw new RangeError("maxDepth must be finite");
+  }
+  if (!Number.isFinite(requestedMaxEvaluations)) {
+    throw new RangeError("maxEvaluations must be finite");
+  }
+  const maxDepth = Math.max(0, Math.floor(requestedMaxDepth));
+  if (maxDepth > MAX_SEARCH_DEPTH) {
+    throw new RangeError(`maxDepth cannot exceed ${MAX_SEARCH_DEPTH}`);
+  }
+  const maxEvaluations = Math.max(1, Math.floor(requestedMaxEvaluations));
+  const candidates = enumerateFaults(graph);
   let evaluations = 0;
 
   const makeResult = (

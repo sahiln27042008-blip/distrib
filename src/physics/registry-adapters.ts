@@ -187,8 +187,9 @@ export const dbHoldAndWriteAmpPrimitive: PhysicsPrimitive = {
     });
     const startLog = sim.log.length;
     const token = (state.token as string) ?? "token-1";
-    pool.acquire(token);
-    pool.release(token);
+    const waiter = { token, requestedAt: 0, active: false };
+    pool.acquire(waiter);
+    pool.release(waiter, 1);
     pool.emitTraceSpans(sim);
     return sim.log.slice(startLog);
   },
@@ -393,13 +394,14 @@ export const llmContextPrimitive: PhysicsPrimitive = {
 
   execute(sim, intervention, state) {
     const startLog = sim.log.length;
-    const llm = new MockLLM({
+    const llm = new MockLLM("resilient", Number((state.seed as number | undefined) ?? 42), {
       contextMode: (state.contextMode as any) ?? "raw_json_80k_flood",
     });
     llm.respond(
-      (state.prompt as string) ??
-        "Perform tasks with deep reasoning and large inputs",
+      (state.prompt as string) ?? "Perform tasks with deep reasoning and large inputs",
       [],
+      1,
+      { query: (state.prompt as string) ?? "customer support issue", workflowStep: "support" },
     );
     llm.emitTraceSpans(sim);
     return sim.log.slice(startLog);
@@ -461,7 +463,7 @@ export const storageWritePrimitive: PhysicsPrimitive = {
       writeAmpMode: (state.writeAmpMode as any) ?? "write_amp_15mb",
       seed: (state.seed as number) ?? 0,
     });
-    storage.writeState(sim, "primary");
+    storage.writeState();
     storage.emitTraceSpans(sim);
     return sim.log.slice(startLog);
   },

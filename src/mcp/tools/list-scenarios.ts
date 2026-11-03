@@ -22,7 +22,7 @@ export interface McpTool {
 export const listScenariosTool: McpTool = {
   name: "list_scenarios",
   description:
-    "Returns available simulation scenarios for diagnosing AI agent reliability failures (matrix, m7-chaos, m8-agent-lab).",
+    "Returns available simulation scenarios for diagnosing AI agent reliability failures (matrix, m7-chaos, m8-agent-lab, and enterprise workflows).",
   inputSchema: {
     type: "object",
     properties: {},
@@ -51,10 +51,35 @@ export const listScenariosTool: McpTool = {
           configType: "AgentContextConfig",
         },
       ],
+      enterpriseScenarios: [
+        {
+          name: "wf-multitenant-saga-reversal",
+          description:
+            "50 tenants, Little's Law queue saturation on V3: LEASE, shipping failure, un-idempotent retry.",
+          configType: "DistribScenarioDefinition",
+        },
+        {
+          name: "wf-speculative-batch-unrolling",
+          description:
+            "Malformed schema on Agent 4, burst unroll triggering HTTP 429 and quadratic context bloat on V2: LOG.",
+          configType: "DistribScenarioDefinition",
+        },
+        {
+          name: "wf-zombie-checkpoint-desync",
+          description:
+            "Container SIGKILL at t=16ms, un-flushed write-ahead log, duplicate vector embeddings on restart.",
+          configType: "DistribScenarioDefinition",
+        },
+        {
+          name: "wf-epistemic-context-tax",
+          description:
+            "Raw 80k JSON flood, TTFT latency cliff, missing SHA-256 claim-check tickets.",
+          configType: "DistribScenarioDefinition",
+        },
+      ],
     };
   },
 };
 
 export const tool = listScenariosTool;
 export default listScenariosTool;
-

@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MatrixScenario } from "../src/matrix-copy.ts";
 import { exportChaosLangChainJsonl } from "../src/chaos-auditor-adapter.ts";
 import type { Trace } from "../src/trace.ts";
+import type { Finding } from "../../../resilient-agent-invariants/src/types/finding.ts";
 
 const repoDir = process.env.SIM_AUDITOR_REPO ?? fileURLToPath(new URL("../../resilient-agent-invariants", import.meta.url));
 const hasAuditor = !!process.env.SIM_AUDITOR_REPO || existsSync(repoDir);
@@ -35,11 +36,7 @@ if (hasAuditor) {
     const trace = scenario.exportTrace() as Trace;
     const jsonl = exportChaosLangChainJsonl(trace);
     const findings = auditTrace(parseLangChainCallbackJsonl(jsonl));
-    const has = findings.some((f) => f.rule_id === "r05-distributed-sagas" && f.status === "proven");
-    if (!has) {
-      console.log("Skipping R05: matrix trace did not expose saga compensation evidence.");
-      return;
-    }
-    assert.ok(has);
+    const finding = findings.find((f: Finding) => f.rule_id === "r05-distributed-sagas" && f.status === "proven");
+    assert.ok(finding, "matrix trace should preserve the first compensation event and its failed saga context");
   });
 }

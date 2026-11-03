@@ -2,46 +2,47 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MatrixScenario, type MatrixConfig } from "../src/matrix-copy.ts";
+import type { Trace } from "../src/trace.ts";
+import { MatrixScenario, type DialA, type DialB, type DialC, type DialD, type DialE, type DialF, type MatrixConfig } from "../src/matrix-copy.ts";
 import { exportChaosLangChainJsonl } from "../src/chaos-auditor-adapter.ts";
 
 function enumerateConfigs(count: number): MatrixConfig[] {
-  const A = [
+  const A: DialA[] = [
     "A1_single_task",
     "A2_mixed_saas",
     "A3_exec_demo_burst",
     "A4_bulk_crm_swarm",
     "A5_marathon_30step",
   ];
-  const B = [
+  const B: DialB[] = [
     "B1_zero_hold_2ms",
     "B2_stream_hog_30s",
     "B3_write_amp_15mb",
     "B4_hydration_freeze_4s",
     "B5_in_doubt_zombie_tx",
   ];
-  const C = [
+  const C: DialC[] = [
     "C1_clean_20ms",
     "C2_socket_drop_2ms_late",
     "C3_rate_limit_429_brownout",
     "C4_bulk_50_poison_pill",
     "C5_legacy_erp_no_idem",
   ];
-  const D = [
+  const D: DialD[] = [
     "D1_raw_json_80k_flood",
     "D2_append_only_quadratic",
     "D3_lossy_llm_summary",
     "D4_unmapped_schema_drift",
     "D5_cqrs_duckdb_blackboard_o1",
   ];
-  const E = [
+  const E: DialE[] = [
     "E1_god_mode_main_thread",
     "E2_walled_garden_stuck",
     "E3_hitl_fatigue_global_bool",
     "E4_state_leases_ipc_worker",
     "E5_audit_log_only_no_enforcement",
   ];
-  const F = [
+  const F: DialF[] = [
     "F1_blind_retry_unbounded_spend",
     "F2_ask_llm_to_undo",
     "F3_resilient_invariant_runtime",
@@ -125,7 +126,7 @@ test("At least 50 of 100 configs produce at least one auditor finding", () => {
   for (const cfg of configs) {
     const sc = new MatrixScenario(cfg);
     sc.run();
-    const trace = sc.exportTrace();
+    const trace = sc.exportTrace() as Trace;
     const jsonl = exportChaosLangChainJsonl(trace);
 
     if (!auditorMod) {

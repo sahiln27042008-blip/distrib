@@ -22,6 +22,8 @@ export type EpistemicState =
   | "UNKNOWN"
   | "NOT_REPRESENTABLE";
 
+export type EpistemicConfidence = "EXPLICIT" | "INFERRED" | "UNKNOWN";
+
 export type ConsonantKind =
   | "DELAY"
   | "SEVER"
@@ -90,6 +92,9 @@ export interface Actor {
 
 export interface Contract {
   guarantees: string[];
+  actorKind?: string;
+  possibleBehaviors?: string[];
+  failureModes?: string[];
 }
 
 export interface CandidatePerturbation {

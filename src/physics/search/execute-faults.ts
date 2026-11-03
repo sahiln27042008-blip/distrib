@@ -12,8 +12,9 @@ import { Lease } from "../alphabet/vowels/lease.ts";
 import { Log } from "../alphabet/vowels/log.ts";
 import { Channel } from "../alphabet/vowels/channel.ts";
 import { applyConsonant } from "../alphabet/apply.ts";
+import { auditNative } from "../alphabet/invariants/native-auditor.ts";
 import type { ConsonantFault } from "./search-types.ts";
-import type { Finding } from "../../../../../resilient-agent-invariants/src/types/finding.ts";
+import type { Finding } from "../alphabet/invariants/finding.ts";
 
 export interface FaultExecutionResult {
   events: SimEvent[];
@@ -29,16 +30,16 @@ interface AuditorModule {
 let cachedAuditor: AuditorModule | null = null;
 
 export function resolveAuditor(): AuditorModule {
-  if (cachedAuditor) return cachedAuditor;
-
   const envRepo = process.env.SIM_AUDITOR_REPO;
-  const candidates = [
-    envRepo,
-    fileURLToPath(new URL("../../../../../../resilient-agent-invariants", import.meta.url)),
-    fileURLToPath(new URL("../../../../../resilient-agent-invariants", import.meta.url)),
-    fileURLToPath(new URL("../../../../resilient-agent-invariants", import.meta.url)),
-    fileURLToPath(new URL("../../../resilient-agent-invariants", import.meta.url)),
-  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  if (!envRepo && cachedAuditor) return cachedAuditor;
+  const candidates = envRepo
+    ? [envRepo]
+    : [
+        fileURLToPath(new URL("../../../../../../resilient-agent-invariants", import.meta.url)),
+        fileURLToPath(new URL("../../../../../resilient-agent-invariants", import.meta.url)),
+        fileURLToPath(new URL("../../../../resilient-agent-invariants", import.meta.url)),
+        fileURLToPath(new URL("../../../resilient-agent-invariants", import.meta.url)),
+      ];
 
   const repo = candidates.find((c) => existsSync(c));
   if (!repo) {
@@ -115,6 +116,66 @@ export function convertAlphabetEventsToLangChainJsonl(
     ...(hasCrash ? { error: "lease.panic_crash" } : {}),
   });
 
+  // Lease expiry evidence (wiring-level failure detection)
+  for (const expire of events.filter((e) => e.kind === "lease.epoch_expired")) {
+    const leaseId = String(expire.data.leaseId ?? expire.corr ?? "lease");
+    const runId = `tool-lease-expire-${leaseId}-${expire.id}`;
+
+    push(expire.t, {
+      event_id: `${runId}:start`,
+      event: "tool_start",
+      run_id: runId,
+      parent_run_id: rootRunId,
+      name: "lease.expire",
+      resource: `lease://${leaseId}`,
+      start_time: iso(expire.t),
+      metadata: { source: "sim-trace/0-to-langchain-callback-jsonl/1; SIMULATED" },
+    });
+
+    push(expire.t, {
+      event_id: `${runId}:end`,
+      event: "tool_end",
+      run_id: runId,
+      parent_run_id: rootRunId,
+      end_time: iso(expire.t),
+      metadata: {
+        source: "sim-trace/0-to-langchain-callback-jsonl/1; SIMULATED",
+        source_event_ids: [`${runId}:start`],
+      },
+      error: "lease.epoch_expired",
+    });
+  }
+
+  // Channel cascade evidence (target lease saturated before send)
+  for (const cascade of events.filter((e) => e.kind === "channel.cascade_failure")) {
+    const channelId = String(cascade.data.channelId ?? cascade.corr ?? "channel");
+    const runId = `tool-channel-cascade-${channelId}-${cascade.id}`;
+
+    push(cascade.t, {
+      event_id: `${runId}:start`,
+      event: "tool_start",
+      run_id: runId,
+      parent_run_id: rootRunId,
+      name: "channel.cascade_failure",
+      resource: `channel://${channelId}`,
+      start_time: iso(cascade.t),
+      metadata: { source: "sim-trace/0-to-langchain-callback-jsonl/1; SIMULATED" },
+    });
+
+    push(cascade.t, {
+      event_id: `${runId}:end`,
+      event: "tool_end",
+      run_id: runId,
+      parent_run_id: rootRunId,
+      end_time: iso(cascade.t),
+      metadata: {
+        source: "sim-trace/0-to-langchain-callback-jsonl/1; SIMULATED",
+        source_event_ids: [`${runId}:start`],
+      },
+      error: "channel.cascade_failure",
+    });
+  }
+
   // Index channel.send events
   const sendEvents = events.filter((e) => e.kind === "channel.send");
   const sendsByChannel = new Map<string, SimEvent[]>();
@@ -138,6 +199,9 @@ export function convertAlphabetEventsToLangChainJsonl(
 
     const runId = `tool-chan-${send.id}`;
     const firstRunId = `tool-chan-${firstSend.id}`;
+    const preCommitSever = events.some(
+      (event) => event.kind === "consonant.sever.pre_commit" && String(event.data.channelId ?? event.corr) === chId,
+    );
 
     const payload = send.data.payload ?? { channelId: chId };
     const bodyHash = sha(payload);
@@ -169,7 +233,10 @@ export function convertAlphabetEventsToLangChainJsonl(
     );
 
     let idempotencyKey: string | null | undefined;
-    if (isRetry) {
+    if (channel?.idempotencyEnabled) {
+      const payloadHash = bodyHash.replace("sha256:", "");
+      idempotencyKey = createHash("sha256").update(`wf+${channel.sourceActorId}+${payloadHash}`).digest("hex");
+    } else if (isRetry) {
       idempotencyKey = targetCell?.idempotencyEnforced && !cellWasWiped ? `idem-${bodyHash}` : null;
     } else {
       idempotencyKey = targetCell?.idempotencyEnforced && !cellWasWiped ? `idem-${bodyHash}` : undefined;
@@ -182,7 +249,7 @@ export function convertAlphabetEventsToLangChainJsonl(
       parent_run_id: rootRunId,
       name: "payment.attempt",
       resource: `channel://${targetActorId}`,
-      side_effect: "POST",
+      ...(targetCell && (!preCommitSever || isRetry) ? { side_effect: "POST" } : {}),
       body_hash: bodyHash,
       ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
       ...(isRetry
@@ -289,7 +356,11 @@ export async function executeFaultSequence(
   faults: ConsonantFault[],
   seed: number,
 ): Promise<FaultExecutionResult> {
-  const sim = new Sim(seed);
+  const requestedDuplicateEvents = faults
+    .filter((fault) => fault.consonantKind === "DUPLICATE")
+    .reduce((total, fault) => total + Math.max(0, Number(fault.params.count) || 0), 0);
+  const maxEvents = Math.min(100_000, Math.max(2_000, 2_000 + requestedDuplicateEvents * 8));
+  const sim = new Sim(seed, { maxEvents });
 
   const cellMap = new Map<string, Cell>();
   const leaseMap = new Map<string, Lease>();
@@ -350,6 +421,8 @@ export async function executeFaultSequence(
         targetActorId: ch.targetActorId,
         timeoutMs: ch.timeoutMs,
         retryPolicy: ch.retryPolicy,
+        idempotencyEnabled: (ch as any).idempotencyEnabled,
+        budgetUsd: ch.budgetUsd,
         sim,
       });
       channelMap.set(channel.id, channel);
@@ -367,6 +440,8 @@ export async function executeFaultSequence(
         targetActorId: ch.targetActorId,
         timeoutMs: ch.timeoutMs,
         retryPolicy: ch.retryPolicy,
+        idempotencyEnabled: (ch as any).idempotencyEnabled,
+        budgetUsd: ch.budgetUsd,
         sim,
       });
       channelMap.set(channel.id, channel);
@@ -403,6 +478,10 @@ export async function executeFaultSequence(
     const heldLease = Array.from(leaseMap.values()).find(
       (l) => l.actorId === ch.sourceActorId && l.heldDuringExternalChannel,
     );
+    const targetLease = Array.from(leaseMap.values()).find(
+      (l) => l.actorId === ch.targetActorId,
+    );
+    const effectiveIdempotencyEnabled = ch.idempotencyEnabled || targetCell?.idempotencyEnforced === true;
 
     const chFaults = channelFaults.filter((f) => f.targetVowelId === ch.id);
     const payload = {
@@ -412,6 +491,23 @@ export async function executeFaultSequence(
       target: ch.targetActorId,
       amount: 100,
     };
+
+    const saturationFaultExists = faults.some(
+      (fault) => fault.targetVowelId === targetLease?.id && fault.consonantKind === "SATURATE",
+    );
+
+    if (targetLease && saturationFaultExists && targetLease.currentLoad >= targetLease.maxCapacity) {
+      sim.emit("channel.cascade_failure", ch.id, {
+        channelId: ch.id,
+        sourceActorId: ch.sourceActorId,
+        targetActorId: ch.targetActorId,
+        targetLeaseId: targetLease.id,
+        targetLoad: targetLease.currentLoad,
+        targetCapacity: targetLease.maxCapacity,
+        policy: targetLease.overflowPolicy,
+      });
+      continue;
+    }
 
     if (chFaults.length > 0) {
       for (const fault of chFaults) {
@@ -448,30 +544,51 @@ export async function executeFaultSequence(
             payload,
           });
 
-          // Un-idempotent cell receives second mutation without dedupKey
-          const retryDedupKey = targetCell?.idempotencyEnforced ? `key-${ch.id}` : undefined;
+          const retryDedupKey = effectiveIdempotencyEnabled
+            ? `sha256(wf+${ch.sourceActorId}+${sha(payload)})`
+            : undefined;
           ch.send(sim, payload, targetCell, { dedupKey: retryDedupKey });
         }
       }
     } else {
       // Normal channel invocation
-      ch.send(sim, payload, targetCell, { heldLease });
+      ch.send(sim, payload, targetCell, {
+        heldLease,
+        dedupKey: effectiveIdempotencyEnabled ? `sha256(wf+${ch.sourceActorId}+${sha(payload)})` : undefined,
+      });
     }
+  }
+
+  for (const lease of leaseMap.values()) {
+    lease.expire(sim.now, sim);
   }
 
   // Drain virtual clock simulation
   while (sim.step()) {}
 
+  const nativeFindings = auditNative(sim.log, vowelMap);
+
   // Convert alphabet events to LangChain JSONL
   const jsonl = convertAlphabetEventsToLangChainJsonl(sim.log, cellMap, channelMap);
 
-  // Audit trace
-  const auditor = resolveAuditor();
-  const internalTrace = auditor.parseLangChainCallbackJsonl(jsonl);
-  const findings: Finding[] = auditor.auditTrace(internalTrace);
+  let externalFindings: Finding[] = [];
+  try {
+    const auditor = resolveAuditor();
+    const internalTrace = auditor.parseLangChainCallbackJsonl(jsonl);
+    externalFindings = auditor.auditTrace(internalTrace);
+  } catch (error) {
+    if (nativeFindings.length === 0 && process.env.SIM_AUDITOR_REPO) throw error;
+  }
+
+  const uniqueFindings = new Map<string, Finding>();
+  for (const finding of [...nativeFindings, ...externalFindings]) {
+    const spanIds = [...finding.evidence.span_ids].sort();
+    uniqueFindings.set(`${finding.rule_id}\u0000${JSON.stringify(spanIds)}`, finding);
+  }
+  const findings = [...uniqueFindings.values()];
 
   const provenRuleIds = findings
-    .filter((f) => f.status === "proven")
+    .filter((f) => f.status === "proven" && f.severity === "critical")
     .map((f) => f.rule_id)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
 

@@ -20,7 +20,26 @@ export async function findCollapseCliff(
   seed: number,
 ): Promise<CollapseCliffResult> {
   const { low, high, tolerance } = options;
-  const maxIterations = Math.max(0, Math.floor(options.maxIterations ?? 30));
+  const requestedMaxIterations = options.maxIterations ?? 30;
+  if (
+    !Number.isFinite(low) ||
+    !Number.isFinite(high) ||
+    !Number.isInteger(low) ||
+    !Number.isInteger(high) ||
+    low < 0 ||
+    low >= high ||
+    !Number.isFinite(tolerance) ||
+    tolerance <= 0
+  ) {
+    throw new RangeError("Cliff search requires integer 0 <= low < high and positive finite tolerance");
+  }
+  if (!Number.isFinite(requestedMaxIterations) || !Number.isInteger(requestedMaxIterations)) {
+    throw new RangeError("maxIterations must be a finite integer");
+  }
+  if (requestedMaxIterations < 0 || requestedMaxIterations > 64) {
+    throw new RangeError("maxIterations must be between 0 and 64");
+  }
+  const maxIterations = requestedMaxIterations;
   const result = (
     status: CollapseCliffResult["status"],
     iterations: number,
@@ -30,6 +49,7 @@ export async function findCollapseCliff(
   ): CollapseCliffResult => ({
     status,
     parameter: parameter.name,
+    testedRange: { low, high },
     ...(lowerSafeBound === undefined ? {} : { lowerSafeBound }),
     ...(upperFailureBound === undefined ? {} : { upperFailureBound }),
     ...(lowerSafeBound === undefined || upperFailureBound === undefined
@@ -39,16 +59,6 @@ export async function findCollapseCliff(
     iterations,
     evaluations,
   });
-
-  if (
-    !Number.isFinite(low) ||
-    !Number.isFinite(high) ||
-    !Number.isFinite(tolerance) ||
-    tolerance <= 0 ||
-    low >= high
-  ) {
-    throw new RangeError("Cliff search requires finite low < high and positive tolerance");
-  }
 
   let evaluations = 0;
   const predicate = async (value: number): Promise<boolean> => {

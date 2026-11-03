@@ -108,10 +108,17 @@ function ruleBasedSelection(
   });
 }
 
+interface ActorContract {
+  actorKind?: string;
+  guarantees: string[];
+  possibleBehaviors?: string[];
+  failureModes?: string[];
+}
+
 function actorsForDescription(
-  actors: Array<{ kind: string; name: string; contract?: { guarantees: string[] } }>,
+  actors: Array<{ kind: string; name: string; contract?: ActorContract }>,
   description?: string,
-): Array<{ kind: string; name: string; contract?: { guarantees: string[] } }> {
+): Array<{ kind: string; name: string; contract?: ActorContract }> {
   if (!description) return actors;
   const text = description.toLowerCase();
   const aliases: Record<string, string[]> = {
@@ -128,7 +135,7 @@ function actorsForDescription(
       .filter(([, terms]) => terms.some((term) => text.includes(term)))
       .map(([kind]) => kind),
   );
-  const inferred: Array<{ kind: string; name: string; contract?: { guarantees: string[] } }> = [];
+  const inferred: Array<{ kind: string; name: string; contract?: ActorContract }> = [];
   const add = (kind: string, name: string, terms: string[]) => {
     if (terms.some((term) => text.includes(term)) && !actors.some((actor) => actor.kind === kind)) inferred.push({ kind, name });
   };

@@ -4,13 +4,13 @@ import { generatePatch } from "../../src/repair/patch-generator.ts";
 import { MATRIX_PRESETS, type MatrixConfig } from "../../src/matrix-copy.ts";
 import type { Finding } from "../../../../resilient-agent-invariants/src/types/finding.ts";
 
-const baseConfig: MatrixConfig = {
+const baseConfig = {
   ...MATRIX_PRESETS.double_charge_2ms_drop,
   seed: 42,
   runId: "test-repair",
   C: "C5_legacy_erp_no_idem",
   F: "F1_blind_retry_unbounded_spend",
-};
+} as MatrixConfig;
 
 test("generatePatch for R04 returns patch with idempotency key diff", async () => {
   const finding: Finding = {

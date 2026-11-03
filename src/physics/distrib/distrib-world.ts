@@ -9,10 +9,214 @@ import type {
   CompiledAlphabetGraph,
   Vowel,
 } from "../alphabet/types.ts";
+import type {
+  BusinessState,
+  InDoubtState,
+  IdempotentOperation,
+  LittleLawMetrics,
+  LedgerEntry,
+  OperationLedger,
+  QueueBacklog,
+} from "./distrib-types.ts";
+import type { Sim } from "../../kernel.ts";
+
+const QUEUE_TIMEOUT_MS = 5000;
+const QUEUE_SAMPLE_INTERVAL_MS = 1000;
+
+export interface DistribWorld {
+  ledger: OperationLedger;
+  operationStates: Map<string, BusinessState>;
+  virtualTimeMs: number;
+  queueBacklog: QueueBacklog;
+  littleLawMetrics: LittleLawMetrics;
+  inDoubtState: InDoubtState;
+}
+
+export function createDistribWorld(): DistribWorld {
+  return {
+    ledger: {
+      entries: new Map(),
+      totalCommittedEffects: 0,
+      totalDuplicateEffects: 0,
+    },
+    operationStates: new Map(),
+    virtualTimeMs: 0,
+    queueBacklog: {
+      arrivalRatePerMs: 0.01,
+      holdDurationMs: 0,
+      maxPoolCapacity: 3,
+      maxQueueDepth: 50,
+      activeLeases: 0,
+      queuedWaiters: [],
+      totalStarved: 0,
+      total504Errors: 0,
+    },
+    littleLawMetrics: {
+      avgHoldMs: 0,
+      p99HoldMs: 0,
+      dbCpuPct: 1.8,
+      poolUtilizationPct: 0,
+    },
+    inDoubtState: {
+      phase: "PRE_COMMIT",
+      committedAt: null,
+      ackLostAt: null,
+      retryReceived: false,
+      retryIdempotencyKey: null,
+      duplicateMutation: false,
+    },
+  };
+}
+
+export function sampleLeaseQueue(
+  world: DistribWorld,
+  lease: Lease,
+  sim: Sim,
+  holdDurationMs: number,
+): void {
+  world.queueBacklog.maxPoolCapacity = lease.maxCapacity;
+  let lastSampleAt = sim.now;
+  let sampleNumber = 0;
+  const stopAt = sim.now + holdDurationMs;
+
+  const sample = (): void => {
+    if (lease.currentLoad === 0 || sim.now > stopAt) return;
+
+    const elapsedMs = sim.now - lastSampleAt;
+    lastSampleAt = sim.now;
+    const activeHoldMs = Math.max(
+      0,
+      ...lease.holders.map((holder) => sim.now - holder.acquiredAt),
+    );
+    world.queueBacklog.activeLeases = lease.currentLoad;
+    world.queueBacklog.holdDurationMs = activeHoldMs;
+    world.littleLawMetrics.avgHoldMs = activeHoldMs;
+    world.littleLawMetrics.p99HoldMs = activeHoldMs;
+    world.littleLawMetrics.poolUtilizationPct =
+      (lease.currentLoad / lease.maxCapacity) * 100;
+
+    if (activeHoldMs > 1000) {
+      const newWaiters = Math.floor(world.queueBacklog.arrivalRatePerMs * elapsedMs);
+      for (let index = 0; index < newWaiters; index++) {
+        const enqueuedAt = sim.now;
+        world.queueBacklog.queuedWaiters.push({
+          callerId: `background-${++sampleNumber}`,
+          enqueuedAt,
+          deadlineMs: enqueuedAt + QUEUE_TIMEOUT_MS,
+        });
+      }
+
+      const remainingWaiters = [];
+      for (const waiter of world.queueBacklog.queuedWaiters) {
+        if (waiter.deadlineMs < sim.now) {
+          world.queueBacklog.totalStarved++;
+          world.queueBacklog.total504Errors++;
+        } else {
+          remainingWaiters.push(waiter);
+        }
+      }
+      world.queueBacklog.queuedWaiters = remainingWaiters;
+      sim.emit("lease.queue_sample", lease.id, {
+        leaseId: lease.id,
+        activeLeases: lease.currentLoad,
+        queuedWaiters: remainingWaiters.length,
+        totalStarved: world.queueBacklog.totalStarved,
+        total504Errors: world.queueBacklog.total504Errors,
+        holdDurationMs: activeHoldMs,
+      });
+    }
+
+    if (sim.now < stopAt) {
+      sim.at(Math.min(QUEUE_SAMPLE_INTERVAL_MS, stopAt - sim.now), "lease.queue_sample", sample);
+    }
+  };
+
+  sim.at(Math.min(QUEUE_SAMPLE_INTERVAL_MS, holdDurationMs), "lease.queue_sample", sample);
+}
+
+export function processPayment(
+  world: DistribWorld,
+  op: IdempotentOperation,
+  amountCents: number,
+  acknowledgmentReceived: boolean,
+): { committed: boolean; duplicate: boolean; state: BusinessState } {
+  const { ledger } = world;
+  const existing = ledger.entries.get(op.operationId);
+  const acknowledgedAt = acknowledgmentReceived ? world.virtualTimeMs : null;
+
+  if (existing && op.idempotencyKey !== null && existing.idempotencyKey === op.idempotencyKey) {
+    if (acknowledgmentReceived) {
+      existing.acknowledgedAt = acknowledgedAt;
+      existing.state = "COMPLETED";
+      world.operationStates.set(op.operationId, "COMPLETED");
+    }
+    return { committed: false, duplicate: false, state: existing.state };
+  }
+
+  if (existing) {
+    const duplicateId = `${op.operationId}-dup-${op.attemptNumber}`;
+    const duplicateEntry: LedgerEntry = {
+      operationId: duplicateId,
+      accountId: existing.accountId,
+      amountCents,
+      committedAt: world.virtualTimeMs,
+      acknowledgedAt,
+      state: acknowledgmentReceived ? "COMPLETED" : "UNKNOWN",
+      idempotencyKey: op.idempotencyKey,
+      duplicateOf: op.operationId,
+    };
+    ledger.entries.set(duplicateId, duplicateEntry);
+    ledger.totalDuplicateEffects++;
+    world.operationStates.set(op.operationId, existing.state);
+    return { committed: true, duplicate: true, state: existing.state };
+  }
+
+  const state: BusinessState = acknowledgmentReceived ? "COMPLETED" : "UNKNOWN";
+  const entry: LedgerEntry = {
+    operationId: op.operationId,
+    accountId: op.accountId,
+    amountCents,
+    committedAt: world.virtualTimeMs,
+    acknowledgedAt,
+    state,
+    idempotencyKey: op.idempotencyKey,
+    duplicateOf: null,
+  };
+  ledger.entries.set(op.operationId, entry);
+  ledger.totalCommittedEffects++;
+  world.operationStates.set(op.operationId, state);
+  return { committed: true, duplicate: false, state };
+}
+
+export function reconcileLedger(ledger: OperationLedger): {
+  balanced: boolean;
+  unresolved: string[];
+} {
+  const unresolved: string[] = [];
+  let committedEntries = 0;
+  let duplicateEntries = 0;
+
+  for (const [id, entry] of ledger.entries) {
+    if (entry.state === "UNKNOWN" || entry.state === "COMMITTED" || entry.state === "PENDING") {
+      unresolved.push(id);
+    }
+    if (entry.duplicateOf === null) committedEntries++;
+    else duplicateEntries++;
+  }
+
+  return {
+    balanced:
+      unresolved.length === 0 &&
+      committedEntries === ledger.totalCommittedEffects &&
+      duplicateEntries === ledger.totalDuplicateEffects,
+    unresolved,
+  };
+}
 
 export interface DistribWorldOptions {
   // Ablations or configuration toggles
   paymentIdempotencyEnforced?: boolean;
+  paymentRetrySuppressed?: boolean;
   fencingTokenEnforced?: boolean;
   pgPoolCapacity?: number;
   workerPoolCapacity?: number;
@@ -26,6 +230,7 @@ export function buildAdversarialAgentWorld(
 ): CompiledAlphabetGraph {
   const {
     paymentIdempotencyEnforced = false, // default: legacy/un-enforced payment to detect duplicate charge vulnerabilities
+    paymentRetrySuppressed = false,
     fencingTokenEnforced = true,
     pgPoolCapacity = 3,
     workerPoolCapacity = 2,
@@ -166,6 +371,7 @@ export function buildAdversarialAgentWorld(
     sourceActorId: "actor-orchestrator",
     targetActorId: "actor-payment-gateway",
     timeoutMs: 8000,
+    retryPolicy: { maxRetries: paymentRetrySuppressed ? 0 : 1 },
   });
   const paymentLedgerCell = new Cell({
     id: "cell-payment-ledger",

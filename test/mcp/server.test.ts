@@ -396,8 +396,8 @@ test("Unit test runAgentLoop with custom orchestrator and tools", async () => {
   assert.equal(result.text, "The sum is 8");
   assert.equal(result.stopReason, "stop");
   assert.equal(result.toolCalls.length, 1);
-  assert.equal(result.toolCalls[0].name, "custom_math");
-  assert.deepEqual(result.toolCalls[0].arguments, { a: 5, b: 3 });
+  assert.equal(result.toolCalls[0]!.name, "custom_math");
+  assert.deepEqual(result.toolCalls[0]!.arguments, { a: 5, b: 3 });
 
   // Verify conversation history was populated
   assert.ok(history.length >= 4); // system, user, assistant with tool_call, tool result

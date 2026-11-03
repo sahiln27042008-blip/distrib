@@ -5,7 +5,7 @@ import { MATRIX_PRESETS, type MatrixConfig } from "../../src/matrix-copy.ts";
 import type { CodePatch } from "../../src/repair/patch-types.ts";
 
 const originalR04Config: MatrixConfig = {
-  ...MATRIX_PRESETS.double_charge_2ms_drop,
+  ...MATRIX_PRESETS.double_charge_2ms_drop!,
   seed: 42,
   runId: "verify-r04",
   C: "C5_legacy_erp_no_idem",
@@ -38,9 +38,9 @@ const nonFixingPatch: CodePatch = {
   changedLines: 0,
   explanation: "Does nothing.",
   dialEquivalent: {
-    dial: "C",
-    from: "C5_legacy_erp_no_idem",
-    to: "C5_legacy_erp_no_idem",
+    dial: "A",
+    from: "A2_mixed_saas",
+    to: "A1_single_task",
   },
 };
 
@@ -61,7 +61,8 @@ test("verifyPatch returns proof string", async () => {
   const result = await verifyPatch(validR04Patch, originalR04Config);
   assert.ok(typeof result.proof === "string");
   assert.ok(result.proof.includes("Fix verified"));
-  assert.ok(result.proof.includes(validR04Patch.description));
+  assert.ok(result.proof.includes("simulating the patch's dial equivalent"));
+  assert.ok(result.proof.includes("C: C5_legacy_erp_no_idem -> C1_clean_20ms"));
 });
 
 test("verifyPatch returns replay handle", async () => {
@@ -89,5 +90,35 @@ test("verifyPatch for R04: before has duplicateDollars, after has 0", async () =
   const result = await verifyPatch(validR04Patch, originalR04Config);
   assert.ok(result.beforeBusinessImpact.includes("duplicate charges"));
   assert.ok(!result.afterBusinessImpact.includes("duplicate charges"));
+});
+
+test("verifyPatch rejects invalid or no-op dialEquivalent patches", async () => {
+  const malformedPatch: CodePatch = {
+    ...validR04Patch,
+    dialEquivalent: {
+      dial: "X",
+      from: "C5_legacy_erp_no_idem",
+      to: "C1_clean_20ms",
+    },
+  };
+
+  await assert.rejects(
+    () => verifyPatch(malformedPatch, originalR04Config),
+    /dialEquivalent.*A-F|dialEquivalent\.dial/i,
+  );
+
+  const noOpPatch: CodePatch = {
+    ...validR04Patch,
+    dialEquivalent: {
+      dial: "C",
+      from: "C5_legacy_erp_no_idem",
+      to: "C5_legacy_erp_no_idem",
+    },
+  };
+
+  await assert.rejects(
+    () => verifyPatch(noOpPatch, originalR04Config),
+    /must change|no-op|from.*to/i,
+  );
 });
 

@@ -6,11 +6,12 @@ export function interventionsToConfig(
   interventions: Intervention[],
 ): MatrixConfig {
   const config = { ...baseConfig };
+  const injectedInterventions = new Set(config.injectedInterventions ?? []);
 
   for (const intervention of interventions) {
     switch (intervention.type) {
       case "missing_idempotency_key":
-        config.C = "C5_legacy_erp_no_idem";
+        injectedInterventions.add(intervention.type);
         break;
       case "drop_response":
       case "delay_response":
@@ -28,12 +29,14 @@ export function interventionsToConfig(
         }
         break;
       case "lose_state":
-        if (config.F === "F3_resilient_invariant_runtime") {
+        if (config.F !== "F3_resilient_invariant_runtime" && config.F !== "F5_graceful_handoff_cascade" && config.F !== "F2_ask_llm_to_undo") {
           config.F = "F1_blind_retry_unbounded_spend";
         }
         break;
       case "duplicate_request":
-        config.F = "F1_blind_retry_unbounded_spend";
+        if (config.F !== "F3_resilient_invariant_runtime" && config.F !== "F5_graceful_handoff_cascade" && config.F !== "F2_ask_llm_to_undo") {
+          config.F = "F1_blind_retry_unbounded_spend";
+        }
         break;
       case "context_bloat":
         config.D = "D1_raw_json_80k_flood";
@@ -60,11 +63,14 @@ export function interventionsToConfig(
   config.runId = baseConfig.runId?.startsWith("adaptive-")
     ? baseConfig.runId
     : `experiment-${baseConfig.seed ?? 0}`;
+  if (injectedInterventions.size > 0) {
+    config.injectedInterventions = [...injectedInterventions];
+  }
   return config;
 }
 
 export function configToInterventions(config: MatrixConfig): InterventionType[] {
-  const active: InterventionType[] = [];
+  const active: InterventionType[] = [...(config.injectedInterventions ?? [])];
 
   if (config.C === "C5_legacy_erp_no_idem") active.push("missing_idempotency_key");
   if (config.C === "C2_socket_drop_2ms_late") active.push("drop_response");

@@ -68,6 +68,9 @@ export interface MockLLMStats {
 
 interface CallRecord {
   turn: number;
+  executionId?: string;
+  executionEventId?: string;
+  startedAtMs?: number;
   inputHash: string;
   outputHash: string;
   inputTokens: number;
@@ -217,6 +220,9 @@ export class MockLLM {
     const rawOutput = estimateTokens(response);
     const outputTokens = boundedOutput ? Math.min(BOUNDED_OUTPUT_TOKENS, rawOutput) : rawOutput;
     const totalTokens = inputTokens + outputTokens;
+    const costMultiplier = typeof scenarioState.costMultiplier === "number" && Number.isFinite(scenarioState.costMultiplier)
+      ? scenarioState.costMultiplier
+      : 1;
 
     this.cumInput += inputTokens;
     this.cumOutput += outputTokens;
@@ -232,7 +238,10 @@ export class MockLLM {
       outputHash: sha256(response),
       inputTokens,
       outputTokens,
-      cost: totalTokens * COST_PER_TOKEN,
+      cost: totalTokens * COST_PER_TOKEN * costMultiplier,
+      ...(typeof scenarioState.executionId === "string" ? { executionId: scenarioState.executionId } : {}),
+      ...(typeof scenarioState.executionEventId === "string" ? { executionEventId: scenarioState.executionEventId } : {}),
+      ...(typeof scenarioState.startedAtMs === "number" ? { startedAtMs: scenarioState.startedAtMs } : {}),
     };
     if (resumeOfTurn !== undefined) record.resumeOfTurn = resumeOfTurn;
     this.calls.push(record);
@@ -272,13 +281,15 @@ export class MockLLM {
         cost: call.cost,
         input_hash: call.inputHash,
         output_hash: call.outputHash,
+        ...(call.executionId ? { execution_id: call.executionId } : {}),
+        ...(call.startedAtMs !== undefined ? { started_at_ms: call.startedAtMs } : {}),
       };
       if (this.dialConfig?.contextMode !== undefined) data.context_mode = this.dialConfig.contextMode;
       if (call.resumeOfTurn !== undefined) {
         const prior = idByTurn.get(call.resumeOfTurn);
         if (prior !== undefined) data.resume_of = prior;
       }
-      const id = sim.emit("model_call", corr, data, parentEventId);
+      const id = sim.emit("model_call", corr, data, call.executionEventId ?? parentEventId);
       idByTurn.set(call.turn, id);
     }
   }

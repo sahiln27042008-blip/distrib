@@ -7,7 +7,7 @@ import { causalAuditTool } from "../../src/mcp/tools/causal-audit.ts";
 import { causalCliffTool } from "../../src/mcp/tools/causal-cliff.ts";
 import { causalVerifyTool } from "../../src/mcp/tools/causal-verify.ts";
 
-test("audit_workflow_reliability returns APPROVED for a known-safe scenario", async () => {
+test("audit_workflow_reliability reports scenario-B's proven lease overflow", async () => {
   const result = await causalAuditTool.handler({
     scenarioId: "scenario-B",
     maxDepth: 2,
@@ -15,10 +15,10 @@ test("audit_workflow_reliability returns APPROVED for a known-safe scenario", as
   });
 
   assert.equal(result.success, true);
-  assert.equal(result.verdict, "APPROVED");
-  assert.equal(result.status, "NO_FAILURE_WITHIN_BOUND");
-  assert.deepEqual(result.violatedInvariants, []);
-  assert.deepEqual(result.minimalCounterexample, []);
+  assert.equal(result.verdict, "BLOCKED");
+  assert.equal(result.status, "FAILURE_FOUND");
+  assert.ok((result.violatedInvariants as string[]).includes("native-lease-capacity-overflow"));
+  assert.equal((result.minimalCounterexample as any[])[0]?.consonantKind, "SATURATE");
   assert.ok(typeof result.evaluationsCount === "number" && (result.evaluationsCount as number) > 0);
   assert.ok(typeof result.durationMs === "number");
 });
@@ -126,7 +126,7 @@ test("sweep_latency_cliff is deterministic", async () => {
   assert.equal(run1.evaluationsCount, run2.evaluationsCount);
 });
 
-test("verify_architecture_patch returns APPROVED when ablation fixes the failure", async () => {
+test("idempotency ablation removes R04 but exposes independent lease expiry", async () => {
   const result = await causalVerifyTool.handler({
     scenarioId: "scenario-A",
     ablation: "enforce_idempotency",
@@ -134,11 +134,11 @@ test("verify_architecture_patch returns APPROVED when ablation fixes the failure
   });
 
   assert.equal(result.success, true);
-  assert.equal(result.verdict, "APPROVED");
-  assert.equal(result.status, "NO_FAILURE_WITHIN_BOUND");
-  assert.equal(result.immuneUpToDepth, 2);
-  assert.equal(result.regressionCheck, "PASSED");
-  assert.deepEqual(result.violatedInvariants, []);
+  assert.equal(result.verdict, "BLOCKED");
+  assert.equal(result.status, "FAILURE_FOUND");
+  assert.equal(result.regressionCheck, "FAILED");
+  assert.ok((result.violatedInvariants as string[]).includes("native-lease-epoch-expiry"));
+  assert.ok(!(result.violatedInvariants as string[]).includes("r04-network-idempotency"));
   assert.ok(typeof result.durationMs === "number");
 });
 

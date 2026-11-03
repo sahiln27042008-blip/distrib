@@ -9,6 +9,10 @@ import type {
 import { buildAdversarialAgentWorld } from "./distrib-world.ts";
 import { searchDistribBfs } from "./bfs-search.ts";
 import { executeDistribWorkflow } from "./distrib-simulator.ts";
+import { Cell } from "../alphabet/vowels/cell.ts";
+import { Lease } from "../alphabet/vowels/lease.ts";
+import { Channel } from "../alphabet/vowels/channel.ts";
+import { Log } from "../alphabet/vowels/log.ts";
 
 export const SCENARIO_DEFINITIONS: DistribScenarioDefinition[] = [
   // Scenario A: Duplicate transaction under timeout
@@ -157,6 +161,220 @@ export const SCENARIO_DEFINITIONS: DistribScenarioDefinition[] = [
         params: { mode: "LOSSY_DROP", selector: { count: 10 } },
       },
     ],
+  },
+
+  // Enterprise Incident 1: wf-multitenant-saga-reversal
+  {
+    id: "wf-multitenant-saga-reversal",
+    name: "Multi-Tenant Saga Reversal & Little's Law Saturation",
+    description: "50 tenants, Little's Law queue saturation on V3: LEASE held during external channel, shipping failure, un-idempotent mutation retry",
+    isRepresentable: true,
+    buildGraph: (ablation?: string | string[]) => {
+      const normAblations = Array.isArray(ablation) ? ablation : ablation ? [ablation] : [];
+      const zeroHold = normAblations.includes("zero_hold_lease") || normAblations.includes("lease");
+      const channelIdem = normAblations.includes("channel_idempotency") || normAblations.includes("enforce_idempotency") || normAblations.includes("outbound_transport_dedup") || ablation === "idempotent_provider";
+      const cellIdem = normAblations.includes("enforce_idempotency") || ablation === "idempotent_provider";
+
+      const actor1 = { id: "actor-1", name: "Order-Saga-Coordinator" };
+      const actor2 = { id: "actor-2", name: "Shipping-Payment-Service" };
+
+      const lease = new Lease({
+        id: "lease-saga-1",
+        actorId: actor1.id,
+        maxCapacity: 1,
+        ttlMs: 5000,
+        overflowPolicy: "WAIT_TIMEOUT",
+        heldDuringExternalChannel: !zeroHold,
+      });
+
+      const cell = new Cell({
+        id: "cell-shipping-2",
+        actorId: actor2.id,
+        persistence: "DURABLE",
+        idempotencyEnforced: cellIdem,
+        fencingTokenEnforced: false,
+      });
+
+      const channel = new Channel({
+        id: "channel-1-2",
+        sourceActorId: actor1.id,
+        targetActorId: actor2.id,
+        timeoutMs: 5000,
+        idempotencyEnabled: channelIdem,
+      });
+
+      return {
+        actors: [actor1, actor2],
+        vowels: [lease, cell, channel],
+        channels: [channel],
+        contracts: [],
+        candidatePerturbations: [
+          { consonant: { kind: "DUPLICATE", count: 2 } as any, targetId: channel.id },
+          { consonant: { kind: "SEVER", phase: "POST_COMMIT" } as any, targetId: channel.id },
+          { consonant: { kind: "SATURATE", loadUnits: 5 } as any, targetId: lease.id },
+        ],
+        epistemicStatus: ["OBSERVED"],
+        unrepresentableSemantics: [],
+      };
+    },
+    candidateFaults: [
+      {
+        consonantKind: "DUPLICATE",
+        targetVowelId: "channel-1-2",
+        params: { count: 2 },
+      },
+      {
+        consonantKind: "SEVER",
+        targetVowelId: "channel-1-2",
+        params: { phase: "POST_COMMIT" },
+      },
+      {
+        consonantKind: "SATURATE",
+        targetVowelId: "lease-saga-1",
+        params: { loadUnits: 5 },
+      },
+    ],
+    expectedFailureInvariant: "r08-zero-hold-lease",
+  },
+
+  // Enterprise Incident 2: wf-speculative-batch-unrolling
+  {
+    id: "wf-speculative-batch-unrolling",
+    name: "Speculative Batch Unrolling & Quadratic Log Amplification",
+    description: "Malformed schema on Agent 4, burst unroll triggering HTTP 429 and quadratic context bloat on V2: LOG",
+    isRepresentable: true,
+    buildGraph: () => {
+      const actor1 = { id: "actor-1", name: "Batch-Unroller" };
+      const actor2 = { id: "actor-2", name: "Downstream-Agent" };
+      const log = new Log({
+        id: "log-batch-context",
+        actorId: actor1.id,
+        maxCapacity: 100,
+        compactionLagMs: 5000,
+        deduplicateOnCompact: false,
+      });
+      const lease = new Lease({
+        id: "lease-batch-worker",
+        actorId: actor2.id,
+        maxCapacity: 2,
+        ttlMs: 5000,
+        overflowPolicy: "REJECT_429",
+      });
+      const channel = new Channel({
+        id: "channel-1-2",
+        sourceActorId: actor1.id,
+        targetActorId: actor2.id,
+        timeoutMs: 5000,
+      });
+      return {
+        actors: [actor1, actor2],
+        vowels: [log, lease, channel],
+        channels: [channel],
+        contracts: [],
+        candidatePerturbations: [
+          { consonant: { kind: "CORRUPT", mode: "SCHEMA_DRIFT" } as any, targetId: channel.id },
+          { consonant: { kind: "SATURATE", loadUnits: 10 } as any, targetId: lease.id },
+        ],
+        epistemicStatus: ["OBSERVED"],
+        unrepresentableSemantics: [],
+      };
+    },
+    candidateFaults: [
+      { consonantKind: "CORRUPT", targetVowelId: "channel-1-2", params: { mode: "SCHEMA_DRIFT" } },
+      { consonantKind: "SATURATE", targetVowelId: "lease-batch-worker", params: { loadUnits: 10 } },
+    ],
+    expectedFailureInvariant: "resource_safety",
+  },
+
+  // Enterprise Incident 3: wf-zombie-checkpoint-desync
+  {
+    id: "wf-zombie-checkpoint-desync",
+    name: "Zombie Checkpoint Desync on Container SIGKILL",
+    description: "Container SIGKILL at t=16ms, un-flushed write-ahead log, duplicate vector embeddings on restart",
+    isRepresentable: true,
+    buildGraph: () => {
+      const actor1 = { id: "actor-1", name: "Checkpoint-Supervisor" };
+      const actor2 = { id: "actor-2", name: "Vector-Store" };
+      const cell1 = new Cell({
+        id: "cell-volatile-state",
+        actorId: actor1.id,
+        persistence: "VOLATILE",
+        idempotencyEnforced: false,
+        fencingTokenEnforced: false,
+      });
+      const cell2 = new Cell({
+        id: "cell-vector-embeddings",
+        actorId: actor2.id,
+        persistence: "DURABLE",
+        idempotencyEnforced: false,
+        fencingTokenEnforced: false,
+      });
+      const channel = new Channel({
+        id: "channel-1-2",
+        sourceActorId: actor1.id,
+        targetActorId: actor2.id,
+        timeoutMs: 5000,
+      });
+      return {
+        actors: [actor1, actor2],
+        vowels: [cell1, cell2, channel],
+        channels: [channel],
+        contracts: [],
+        candidatePerturbations: [
+          { consonant: { kind: "WIPE", scope: "VOLATILE_CELLS", cellIds: [cell1.id] } as any, targetId: cell1.id },
+          { consonant: { kind: "SEVER", phase: "POST_COMMIT" } as any, targetId: channel.id },
+        ],
+        epistemicStatus: ["OBSERVED"],
+        unrepresentableSemantics: [],
+      };
+    },
+    candidateFaults: [
+      { consonantKind: "WIPE", targetVowelId: "cell-volatile-state", params: { scope: "VOLATILE_CELLS", cellIds: ["cell-volatile-state"] } },
+      { consonantKind: "SEVER", targetVowelId: "channel-1-2", params: { phase: "POST_COMMIT" } },
+    ],
+    expectedFailureInvariant: "recovery",
+  },
+
+  // Enterprise Incident 4: wf-epistemic-context-tax
+  {
+    id: "wf-epistemic-context-tax",
+    name: "Epistemic Context Tax & TTFT Latency Cliff",
+    description: "Raw 80k JSON flood, TTFT latency cliff, missing SHA-256 claim-check tickets",
+    isRepresentable: true,
+    buildGraph: () => {
+      const actor1 = { id: "actor-1", name: "LLM-Agent-Router" };
+      const actor2 = { id: "actor-2", name: "Evaluator" };
+      const log = new Log({
+        id: "log-prompt-context",
+        actorId: actor1.id,
+        maxCapacity: 80000,
+        compactionLagMs: 0,
+        deduplicateOnCompact: false,
+      });
+      const channel = new Channel({
+        id: "channel-1-2",
+        sourceActorId: actor1.id,
+        targetActorId: actor2.id,
+        timeoutMs: 3000,
+      });
+      return {
+        actors: [actor1, actor2],
+        vowels: [log, channel],
+        channels: [channel],
+        contracts: [],
+        candidatePerturbations: [
+          { consonant: { kind: "DELAY", durationMs: 4000 } as any, targetId: channel.id },
+          { consonant: { kind: "CORRUPT", mode: "LOSSY_DROP" } as any, targetId: log.id },
+        ],
+        epistemicStatus: ["OBSERVED"],
+        unrepresentableSemantics: [],
+      };
+    },
+    candidateFaults: [
+      { consonantKind: "DELAY", targetVowelId: "channel-1-2", params: { durationMs: 4000 } },
+      { consonantKind: "CORRUPT", targetVowelId: "log-prompt-context", params: { mode: "LOSSY_DROP" } },
+    ],
+    expectedFailureInvariant: "event_integrity",
   },
 ];
 

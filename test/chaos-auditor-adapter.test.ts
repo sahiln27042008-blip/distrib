@@ -56,7 +56,9 @@ test("adapter emits chain_start + payment tool events for a minimal sim trace", 
   assert.equal(start.retry_count, 1);
   assert.equal(start.attempt_of, "root");
   assert.equal((start.metadata as Record<string, unknown>).source, "sim-trace/0-to-langchain-callback-jsonl/1; SIMULATED");
-  assert.equal(records[0].event, "chain_start");
+  const firstRecord = records[0];
+  assert.ok(firstRecord);
+  assert.equal(firstRecord.event, "chain_start");
   assert.equal(out, out.trim() + "\n");
 });
 

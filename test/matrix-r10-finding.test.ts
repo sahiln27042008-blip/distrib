@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MatrixScenario } from "../src/matrix-copy.ts";
 import { exportChaosLangChainJsonl } from "../src/chaos-auditor-adapter.ts";
 import type { Trace } from "../src/trace.ts";
+import type { Finding } from "../../../resilient-agent-invariants/src/types/finding.ts";
 
 const repoDir = process.env.SIM_AUDITOR_REPO ?? fileURLToPath(new URL("../../resilient-agent-invariants", import.meta.url));
 const hasAuditor = !!process.env.SIM_AUDITOR_REPO || existsSync(repoDir);
@@ -29,17 +30,13 @@ if (hasAuditor) {
       dbPoolSize: 20,
       workflowSteps: 10,
       saasPriceUsd: 20,
-      ticketValueUsd: 5,
+      ticketValueUsd: 2,
     });
     scenario.run();
     const trace = scenario.exportTrace() as Trace;
     const jsonl = exportChaosLangChainJsonl(trace);
     const findings = auditTrace(parseLangChainCallbackJsonl(jsonl));
-    const has = findings.some((f) => f.rule_id === "r10-unit-economics" && f.status === "proven");
-    if (!has) {
-      console.log("Skipping R10: matrix trace did not exceed declared budget in the adapter output.");
-      return;
-    }
-    assert.ok(has);
+    const finding = findings.find((f: Finding) => f.rule_id === "r10-unit-economics" && f.status === "proven");
+    assert.ok(finding, "matrix trace should carry ticketValueUsd as its declared task budget");
   });
 }

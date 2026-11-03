@@ -65,17 +65,17 @@ test("Case 001 - Scientist execution on reconstructed pre-incident architecture"
 
   const result = await runScientist(config);
 
-  // Verify that the system ran the experiments independently
-  assert.equal(result.experimentsRun, 4);
+  // The local MockOrchestrator does not produce hypotheses. The Scientist must
+  // fail closed rather than convert that unrelated tool call into a finding.
+  assert.equal(result.status, "INCONCLUSIVE");
+  assert.equal(result.experimentsRun, 0);
+  assert.equal(result.discoveredFailures.length, 0);
 
-  // Discovered failure identified via automated exploration
-  assert.equal(result.discoveredFailures.length, 1);
-
-  // Prediction recorded reflects this reality honestly
+  // The checked-in prediction is historical fixture data, not this model run.
   const prediction = JSON.parse(
     fs.readFileSync(path.join(caseDir, "prediction.json"), "utf8"),
   );
-  assert.equal(prediction.discovered_failures.length, 1);
-  assert.ok(prediction.prediction.includes("FAILURE_FOUND"));
+  assert.ok(Array.isArray(prediction.discovered_failures));
+  assert.ok(typeof prediction.prediction === "string");
 });
 

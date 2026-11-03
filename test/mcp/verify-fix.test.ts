@@ -93,6 +93,24 @@ test("verify_fix reports NOT fixed when dial doesn't change", async () => {
   assert.match(String(res.proof), /Fix did NOT resolve the finding/i);
 });
 
+test("verify_fix does not approve comparisons with different seeds", async () => {
+  const fixedConfig: MatrixConfig = {
+    ...originalR04Config,
+    C: "C1_clean_20ms",
+    seed: originalR04Config.seed + 1,
+  };
+
+  const res = await verifyFixTool.handler({
+    originalConfig: originalR04Config,
+    fixedConfig,
+    findingRuleId: "r04-network-idempotency",
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(res.isFixed, false);
+  assert.match(String(res.proof), /same seed|seed mismatch/i);
+});
+
 test("verify_fix with invalid configs returns error", async () => {
   // Missing required originalConfig
   const res1 = await verifyFixTool.handler({

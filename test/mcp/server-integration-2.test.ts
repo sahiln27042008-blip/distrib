@@ -68,7 +68,7 @@ function httpRequest(
   });
 }
 
-test("tools/list returns 9 tools including run_scientist", async () => {
+test("tools/list returns 11 tools including run_scientist", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -89,7 +89,7 @@ test("tools/list returns 9 tools including run_scientist", async () => {
     assert.equal(listRes.statusCode, 200);
     const tools = listRes.body.tools || listRes.body.result?.tools;
     assert.ok(Array.isArray(tools));
-    assert.equal(tools.length, 9);
+    assert.equal(tools.length, 11);
 
     const names = tools.map((t: any) => t.name);
     assert.ok(names.includes("describe_system"));
@@ -106,7 +106,7 @@ test("tools/list returns 9 tools including run_scientist", async () => {
   }
 });
 
-test("tools/call with run_scientist returns discovered failures", async () => {
+test("tools/call with run_scientist fails closed for local mock output", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -144,14 +144,12 @@ test("tools/call with run_scientist returns discovered failures", async () => {
 
     const discoveredFailures =
       callRes.body.discoveredFailures ?? callRes.body.result?.discoveredFailures;
-    assert.ok(discoveredFailures > 0);
+    assert.equal(discoveredFailures, 0);
 
     const failures = callRes.body.failures || callRes.body.result?.failures;
     assert.ok(Array.isArray(failures));
-    assert.ok(failures.length > 0);
-    assert.ok(failures[0].hypothesis);
-    assert.ok(failures[0].expectedInvariant);
-    assert.ok(failures[0].businessImpact);
+    assert.equal(failures.length, 0);
+    assert.equal(callRes.body.status ?? callRes.body.result?.status, "INCONCLUSIVE");
   } finally {
     await mcp.close();
   }

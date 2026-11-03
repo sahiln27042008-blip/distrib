@@ -4,11 +4,12 @@ import { searchFaults } from "../../physics/search/fault-search.ts";
 import { resolveScenario, resolveWorkflow, workflowToGraph, type ToolContext, type ToolResult, type McpTool } from "./causal-audit.ts";
 import { Cell } from "../../physics/alphabet/vowels/cell.ts";
 import { Lease } from "../../physics/alphabet/vowels/lease.ts";
+import { Channel } from "../../physics/alphabet/vowels/channel.ts";
 
 export const causalVerifyTool: McpTool = {
   name: "verify_architecture_patch",
   description:
-    "Re-runs the BFS engine with resilient ablations (e.g., idempotency keys, zero-hold leasing) to prove zero regressions after a proposed fix.",
+    "Re-runs the BFS engine with resilient ablations (e.g., idempotency keys, zero-hold leasing, channel transport dedup) to prove zero regressions after a proposed fix.",
   inputSchema: {
     type: "object",
     properties: {
@@ -16,10 +17,25 @@ export const causalVerifyTool: McpTool = {
       seed: { type: "number", default: 42817 },
       ablation: {
         type: "string",
-        enum: ["enforce_idempotency", "fencing_token_enabled", "zero_hold_lease", "idempotency", "fencing", "lease", "release_before_llm"],
+        enum: [
+          "channel_idempotency",
+          "enforce_idempotency",
+          "fencing_token_enabled",
+          "zero_hold_lease",
+          "idempotency",
+          "fencing",
+          "lease",
+          "release_before_llm",
+          "outbound_transport_dedup",
+          "channel_dedup",
+        ],
+      },
+      ablations: {
+        type: "array",
+        items: { type: "string" },
       },
     },
-    required: ["scenarioId", "ablation"],
+    required: ["scenarioId"],
   },
   async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
     const scenarioId = args.scenarioId as string | undefined;
@@ -30,8 +46,19 @@ export const causalVerifyTool: McpTool = {
       };
     }
 
-    const ablation = args.ablation as string | undefined;
-    if (!ablation || typeof ablation !== "string" || ablation.trim() === "") {
+    const rawAblations: string[] = [];
+    if (Array.isArray(args.ablations)) {
+      for (const a of args.ablations) {
+        if (typeof a === "string" && a.trim() !== "") {
+          rawAblations.push(a.trim());
+        }
+      }
+    }
+    if (typeof args.ablation === "string" && args.ablation.trim() !== "") {
+      rawAblations.push(args.ablation.trim());
+    }
+
+    if (rawAblations.length === 0) {
       return {
         success: false,
         error: "ablation is required",
@@ -43,13 +70,28 @@ export const causalVerifyTool: McpTool = {
       fencing: "fencing_token_enabled",
       lease: "zero_hold_lease",
       release_before_llm: "zero_hold_lease",
+      outbound_transport_dedup: "channel_idempotency",
+      channel_dedup: "channel_idempotency",
     };
-    const normalizedAblation = ablationAliases[ablation] ?? ablation;
-    if (!["enforce_idempotency", "fencing_token_enabled", "zero_hold_lease"].includes(normalizedAblation)) {
-      return {
-        success: false,
-        error: `Unsupported ablation: ${ablation}. Supported: enforce_idempotency, fencing_token_enabled, zero_hold_lease, idempotency, fencing, lease, release_before_llm`,
-      };
+    const supportedAblations = new Set([
+      "channel_idempotency",
+      "enforce_idempotency",
+      "fencing_token_enabled",
+      "zero_hold_lease",
+    ]);
+
+    const normalizedAblations: string[] = [];
+    for (const ab of rawAblations) {
+      const norm = ablationAliases[ab] ?? ab;
+      if (!supportedAblations.has(norm)) {
+        return {
+          success: false,
+          error: `Unsupported ablation: ${ab}. Supported: channel_idempotency, enforce_idempotency, fencing_token_enabled, zero_hold_lease, idempotency, fencing, lease, release_before_llm, outbound_transport_dedup`,
+        };
+      }
+      if (!normalizedAblations.includes(norm)) {
+        normalizedAblations.push(norm);
+      }
     }
 
     const normalizedScenarioId = scenarioId.trim().replace(/\./g, "-").toLowerCase();
@@ -69,32 +111,39 @@ export const causalVerifyTool: McpTool = {
 
     const startedAt = performance.now();
 
-    // Map ablation name to graph builder parameter
-    let graphAblationArg: string | undefined = normalizedAblation;
-    if (normalizedAblation === "enforce_idempotency") {
+    // Pass ablation arg(s) to scenario buildGraph
+    let graphAblationArg: string | string[] = normalizedAblations.length === 1
+      ? normalizedAblations[0]!
+      : normalizedAblations;
+    if (normalizedAblations.length === 1 && normalizedAblations[0] === "enforce_idempotency") {
       graphAblationArg = "idempotent_provider";
     }
 
-    const graph = scenario ? scenario.buildGraph(graphAblationArg) : workflowToGraph(workflow!);
+    const graph = scenario ? scenario.buildGraph(graphAblationArg as any) : workflowToGraph(workflow!);
 
-    // Apply ablation modifications to vowels directly
-    if (normalizedAblation === "enforce_idempotency") {
-      for (const vowel of graph.vowels) {
-        if (vowel.kind === "CELL" && vowel instanceof Cell) {
+    // Apply ablation modifications to vowels and channels directly
+    for (const vowel of graph.vowels) {
+      if (vowel.kind === "CELL" && vowel instanceof Cell) {
+        if (normalizedAblations.includes("enforce_idempotency")) {
           (vowel as any).idempotencyEnforced = true;
         }
-      }
-    } else if (normalizedAblation === "fencing_token_enabled") {
-      for (const vowel of graph.vowels) {
-        if (vowel.kind === "CELL" && vowel instanceof Cell) {
+        if (normalizedAblations.includes("fencing_token_enabled")) {
           (vowel as any).fencingTokenEnforced = true;
         }
-      }
-    } else if (normalizedAblation === "zero_hold_lease") {
-      for (const vowel of graph.vowels) {
-        if (vowel.kind === "LEASE" && vowel instanceof Lease) {
+      } else if (vowel.kind === "LEASE" && vowel instanceof Lease) {
+        if (normalizedAblations.includes("zero_hold_lease")) {
           (vowel as any).heldDuringExternalChannel = false;
         }
+      } else if (vowel.kind === "CHANNEL" && vowel instanceof Channel) {
+        if (normalizedAblations.includes("channel_idempotency") || normalizedAblations.includes("enforce_idempotency")) {
+          (vowel as any).idempotencyEnabled = true;
+        }
+      }
+    }
+
+    for (const ch of graph.channels) {
+      if (normalizedAblations.includes("channel_idempotency") || normalizedAblations.includes("enforce_idempotency")) {
+        (ch as any).idempotencyEnabled = true;
       }
     }
 
@@ -125,7 +174,8 @@ export const causalVerifyTool: McpTool = {
         verdict,
         status: searchResult.status,
         scenarioId: scenario?.id ?? workflow?.id,
-        ablation: normalizedAblation,
+        ablation: normalizedAblations.length === 1 ? normalizedAblations[0] : normalizedAblations.join("+"),
+        ablations: normalizedAblations,
         immuneUpToDepth,
         regressionCheck,
         shortestDepth: searchResult.minimalCounterexample
@@ -149,4 +199,3 @@ export const causalVerifyTool: McpTool = {
 
 export const tool = causalVerifyTool;
 export default causalVerifyTool;
-

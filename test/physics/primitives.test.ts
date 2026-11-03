@@ -14,7 +14,7 @@ test("partial_commit produces committed + ack_lost + retry events", () => {
   const sim = new Sim(12345);
   const intervention = partialCommitPrimitive.generateInterventions({
     actors: [],
-  })[0];
+  })[0]!;
   const events = partialCommitPrimitive.execute(sim, intervention, {
     amount: 75,
   });
@@ -40,7 +40,7 @@ test("partial_commit is deterministic (same seed = same events)", () => {
   const sim2 = new Sim(42);
   const intervention = partialCommitPrimitive.generateInterventions({
     actors: [],
-  })[0];
+  })[0]!;
 
   const events1 = partialCommitPrimitive.execute(sim1, intervention, {
     corr: "tx-test",
@@ -58,7 +58,7 @@ test("eventual_consistency produces stale_read + converge events", () => {
   const sim = new Sim(12345);
   const intervention = eventualConsistencyPrimitive.generateInterventions({
     actors: [],
-  })[0];
+  })[0]!;
   const events = eventualConsistencyPrimitive.execute(sim, intervention, {
     lagMs: 40,
   });
@@ -80,7 +80,7 @@ test("queue_duplicate_delivery produces deliver + redeliver events", () => {
   const sim = new Sim(12345);
   const intervention = queueDuplicateDeliveryPrimitive.generateInterventions({
     actors: [],
-  })[0];
+  })[0]!;
   const events = queueDuplicateDeliveryPrimitive.execute(sim, intervention, {});
 
   const kinds = events.map((e) => e.kind);
@@ -96,7 +96,7 @@ test("tool_partial_success produces partial_success events", () => {
   const sim = new Sim(12345);
   const intervention = toolPartialSuccessPrimitive.generateInterventions({
     actors: [],
-  })[0];
+  })[0]!;
   const events = toolPartialSuccessPrimitive.execute(sim, intervention, {
     totalItems: 10,
     succeededItems: 7,
@@ -116,7 +116,7 @@ test("worker_state_loss produces crash + restart + reconstruct events", () => {
   const sim = new Sim(12345);
   const intervention = workerStateLossPrimitive.generateInterventions({
     actors: [],
-  })[0];
+  })[0]!;
   const events = workerStateLossPrimitive.execute(sim, intervention, {});
 
   const kinds = events.map((e) => e.kind);
@@ -135,7 +135,7 @@ test("All 5 new primitives are deterministic", () => {
   for (const primitive of NEW_PRIMITIVES) {
     const sim1 = new Sim(999);
     const sim2 = new Sim(999);
-    const intervention = primitive.generateInterventions({ actors: [] })[0];
+    const intervention = primitive.generateInterventions({ actors: [] })[0]!;
 
     const events1 = primitive.execute(sim1, intervention, { corr: "det-test" });
     const events2 = primitive.execute(sim2, intervention, { corr: "det-test" });
@@ -151,7 +151,7 @@ test("All 5 new primitives are deterministic", () => {
 test("All 5 new primitives produce trace spans with attrs", () => {
   for (const primitive of NEW_PRIMITIVES) {
     const sim = new Sim(555);
-    const intervention = primitive.generateInterventions({ actors: [] })[0];
+    const intervention = primitive.generateInterventions({ actors: [] })[0]!;
     const events = primitive.execute(sim, intervention, {});
 
     assert.ok(primitive.toSpans, `${primitive.id} missing toSpans`);

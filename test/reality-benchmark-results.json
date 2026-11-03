@@ -1,0 +1,197 @@
+{
+  "totalIncidents": 6,
+  "reproducedCount": 4,
+  "partialReproductionCount": 1,
+  "falseNegativeCount": 0,
+  "falsePositiveCount": 0,
+  "modelGapCount": 1,
+  "modelGapHonestCount": 1,
+  "predictionAccuracy": 0.8,
+  "incidents": [
+    {
+      "id": "github-2018-mysql-partition",
+      "reproduced": false,
+      "partialReproduction": true,
+      "reproductionType": "partial",
+      "matchedRuleId": true,
+      "matchedDepth": true,
+      "matchedCliff": true,
+      "actualRuleId": "r04-network-idempotency",
+      "actualDepth": 1,
+      "actualCliffMs": 42993.5,
+      "actualCounterexample": [
+        {
+          "consonantKind": "SEVER",
+          "targetVowelId": "vowel-1-1",
+          "params": {
+            "phase": "POST_COMMIT"
+          }
+        }
+      ],
+      "modelGap": false,
+      "notes": "PARTIAL_REPRODUCTION: reproduced accepted sub-failure (r04-network-idempotency); expected native-lease-epoch-expiry remains uncovered",
+      "normalizedKinds": [
+        "OMISSION"
+      ],
+      "expectedKinds": [
+        "OMISSION"
+      ],
+      "pinnedEventKinds": [],
+      "violatedInvariants": [
+        "r04-network-idempotency"
+      ],
+      "findings": []
+    },
+    {
+      "id": "cloudflare-edge-proxy-overflow",
+      "reproduced": true,
+      "partialReproduction": false,
+      "reproductionType": "exact",
+      "matchedRuleId": true,
+      "matchedDepth": true,
+      "matchedCliff": true,
+      "actualRuleId": "native-lease-capacity-overflow",
+      "actualDepth": 1,
+      "actualCliffMs": null,
+      "actualCounterexample": [
+        {
+          "consonantKind": "SATURATE",
+          "targetVowelId": "vowel-2-1",
+          "params": {
+            "loadUnits": 70
+          }
+        }
+      ],
+      "modelGap": false,
+      "notes": "reproduced via minimal counterexample and matching rule-depth",
+      "normalizedKinds": [
+        "SATURATE"
+      ],
+      "expectedKinds": [
+        "SATURATE"
+      ],
+      "pinnedEventKinds": [],
+      "violatedInvariants": [
+        "native-lease-capacity-overflow"
+      ],
+      "findings": []
+    },
+    {
+      "id": "stripe-double-charge",
+      "reproduced": true,
+      "partialReproduction": false,
+      "reproductionType": "exact",
+      "matchedRuleId": true,
+      "matchedDepth": true,
+      "matchedCliff": true,
+      "actualRuleId": "r04-network-idempotency",
+      "actualDepth": 1,
+      "actualCliffMs": null,
+      "actualCounterexample": [
+        {
+          "consonantKind": "SEVER",
+          "targetVowelId": "vowel-1-1",
+          "params": {
+            "phase": "POST_COMMIT"
+          }
+        }
+      ],
+      "modelGap": false,
+      "notes": "reproduced via minimal counterexample and matching rule-depth",
+      "normalizedKinds": [
+        "OMISSION"
+      ],
+      "expectedKinds": [
+        "OMISSION"
+      ],
+      "pinnedEventKinds": [],
+      "violatedInvariants": [
+        "r04-network-idempotency"
+      ],
+      "findings": []
+    },
+    {
+      "id": "knight-capital-retry-storm",
+      "reproduced": true,
+      "partialReproduction": false,
+      "reproductionType": "exact",
+      "matchedRuleId": true,
+      "matchedDepth": true,
+      "matchedCliff": true,
+      "actualRuleId": "native-cost-burn",
+      "actualDepth": 1,
+      "actualCliffMs": null,
+      "actualCounterexample": [
+        {
+          "consonantKind": "DUPLICATE",
+          "targetVowelId": "vowel-1-1",
+          "params": {
+            "count": 1000
+          }
+        }
+      ],
+      "modelGap": false,
+      "notes": "reproduced via minimal counterexample and matching rule-depth",
+      "normalizedKinds": [
+        "DUPLICATION"
+      ],
+      "expectedKinds": [
+        "DUPLICATION"
+      ],
+      "pinnedEventKinds": [],
+      "violatedInvariants": [
+        "native-cost-burn"
+      ],
+      "findings": []
+    },
+    {
+      "id": "aws-dynamodb-us-east-1-overload",
+      "reproduced": true,
+      "partialReproduction": false,
+      "reproductionType": "exact",
+      "matchedRuleId": true,
+      "matchedDepth": true,
+      "matchedCliff": true,
+      "actualRuleId": "native-channel-cascade",
+      "actualDepth": 1,
+      "actualCliffMs": null,
+      "actualCounterexample": [
+        {
+          "consonantKind": "SATURATE",
+          "targetVowelId": "vowel-1-1",
+          "params": {
+            "loadUnits": 200
+          }
+        }
+      ],
+      "modelGap": false,
+      "notes": "reproduced via minimal counterexample and matching rule-depth",
+      "normalizedKinds": [
+        "SATURATE"
+      ],
+      "expectedKinds": [
+        "SATURATE"
+      ],
+      "pinnedEventKinds": [],
+      "violatedInvariants": [
+        "native-channel-cascade"
+      ],
+      "findings": []
+    },
+    {
+      "id": "gitlab-database-deletion",
+      "reproduced": false,
+      "matchedRuleId": false,
+      "matchedDepth": false,
+      "matchedCliff": false,
+      "actualRuleId": "MODEL_GAP",
+      "actualDepth": 0,
+      "actualCliffMs": null,
+      "actualCounterexample": [],
+      "modelGap": true,
+      "partialReproduction": false,
+      "reproductionType": "model_gap",
+      "notes": "MODEL_GAP: human-initiated destructive command with absent backup coverage is not representable by the 10-character causal alphabet (no consonant models operator-initiated state destruction outside the system's execution path)."
+    }
+  ]
+}

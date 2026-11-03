@@ -6,6 +6,14 @@ import type { InvariantResult } from "./distrib-types.ts";
 import type { Cell } from "../alphabet/vowels/cell.ts";
 import type { Lease } from "../alphabet/vowels/lease.ts";
 import type { Log } from "../alphabet/vowels/log.ts";
+import type {
+  BusinessState,
+  InDoubtState,
+  LittleLawMetrics,
+  OperationLedger,
+  QueueBacklog,
+} from "./distrib-types.ts";
+import { reconcileLedger } from "./distrib-world.ts";
 
 export interface EvaluationContext {
   events: SimEvent[];
@@ -13,13 +21,79 @@ export interface EvaluationContext {
   leases: Map<string, Lease>;
   logs: Map<string, Log>;
   auditorFindings: Finding[];
+  ledger: OperationLedger;
+  operationStates: Map<string, BusinessState>;
+  queueBacklog: QueueBacklog;
+  littleLawMetrics: LittleLawMetrics;
+  inDoubtState: InDoubtState;
+}
+
+export function checkZeroHoldLease(
+  queue: QueueBacklog,
+  metrics: LittleLawMetrics,
+): InvariantResult {
+  const breached =
+    queue.total504Errors > 0 || queue.queuedWaiters.length > queue.maxQueueDepth;
+  return {
+    id: "R08_ZeroHoldLease",
+    name: "R08 Zero-Hold Lease: Continuous Queue Saturation",
+    category: "lease_safety",
+    passed: !breached,
+    evidence: breached
+      ? `Connection pool starvation: ${queue.total504Errors} HTTP 504 errors and ${queue.queuedWaiters.length} queued waiters`
+      : `No queue saturation (${queue.queuedWaiters.length}/${queue.maxQueueDepth} waiters, ${queue.total504Errors} HTTP 504 errors)`,
+    details: breached
+      ? {
+          activeConnections: queue.activeLeases,
+          maxPoolCapacity: queue.maxPoolCapacity,
+          queuedWaiters: queue.queuedWaiters.length,
+          avgHoldMs: metrics.avgHoldMs,
+          dbCpuPct: metrics.dbCpuPct,
+          breachType: "HTTP_504_GATEWAY_TIMEOUT",
+          detail: `Connection pool starvation on ClientRead wait event; DB CPU idle at ${metrics.dbCpuPct}% while held leases block callers`,
+        }
+      : undefined,
+  };
+}
+
+export function checkNetworkIdempotencyInDoubt(
+  state: InDoubtState,
+  ledger: OperationLedger,
+): InvariantResult {
+  const duplicateEntries = Array.from(ledger.entries.values()).filter(
+    (entry) => entry.duplicateOf !== null,
+  );
+  const duplicateDollars = duplicateEntries.reduce(
+    (sum, entry) => sum + entry.amountCents,
+    0,
+  ) / 100;
+  return {
+    id: "R04_NetworkIdempotency",
+    name: "R04 Network Idempotency: In-Doubt Mutation Replay",
+    category: "idempotency",
+    passed: !state.duplicateMutation,
+    evidence: state.duplicateMutation
+      ? `Post-commit ACK loss followed by retry created ${ledger.totalDuplicateEffects} duplicate mutation(s)`
+      : `No duplicate mutation after ACK loss or retry (phase: ${state.phase})`,
+    details: state.duplicateMutation
+      ? {
+          inDoubtPhase: state.phase,
+          committedAt: state.committedAt,
+          ackLostAt: state.ackLostAt,
+          retryKey: state.retryIdempotencyKey,
+          duplicateCharges: ledger.totalDuplicateEffects,
+          duplicateDollars,
+          detail: "Post-commit ACK lost; client in IN_DOUBT state retried without an effective idempotency key",
+        }
+      : undefined,
+  };
 }
 
 export function evaluateDistribInvariants(ctx: EvaluationContext): {
   invariants: InvariantResult[];
   violatedInvariants: string[];
 } {
-  const { events, cells, leases, logs, auditorFindings } = ctx;
+  const { events, cells, leases, logs, auditorFindings, ledger, operationStates } = ctx;
   const results: InvariantResult[] = [];
 
   // 1. Payment Safety: 1 logical payment operation must not produce multiple successful charges
@@ -184,12 +258,83 @@ export function evaluateDistribInvariants(ctx: EvaluationContext): {
       : `BROKEN CAUSAL CHAIN: ${missingCorr.length} channel events missing correlation ids`,
   });
 
+  const noDuplicateEffectsPassed = ledger.totalDuplicateEffects === 0;
+  results.push({
+    id: "no_duplicate_effects",
+    name: "No Duplicate Financial Effects",
+    category: "payment_safety",
+    passed: noDuplicateEffectsPassed,
+    evidence: noDuplicateEffectsPassed
+      ? `No duplicate effects across ${ledger.totalCommittedEffects} committed operations`
+      : `DUPLICATE EFFECTS: ${ledger.totalDuplicateEffects} duplicate financial effects recorded`,
+    details: {
+      totalCommittedEffects: ledger.totalCommittedEffects,
+      totalDuplicateEffects: ledger.totalDuplicateEffects,
+      duplicates: Array.from(ledger.entries.values()).filter((entry) => entry.duplicateOf !== null),
+    },
+  });
+
+  results.push(checkZeroHoldLease(ctx.queueBacklog, ctx.littleLawMetrics));
+  results.push(checkNetworkIdempotencyInDoubt(ctx.inDoubtState, ledger));
+
+  const incompleteOperations = Array.from(operationStates.entries())
+    .filter(([, state]) => state !== "COMPLETED")
+    .map(([operationId, state]) => ({ operationId, state }));
+  results.push({
+    id: "all_operations_completed",
+    name: "All Business Operations Completed",
+    category: "task_correctness",
+    passed: incompleteOperations.length === 0,
+    evidence: incompleteOperations.length === 0
+      ? `All ${operationStates.size} logical operations reached COMPLETED`
+      : `INCOMPLETE BUSINESS OPERATIONS: ${incompleteOperations.map(({ operationId, state }) => `${operationId}=${state}`).join(", ")}`,
+    details: { incompleteOperations },
+  });
+
+  const reconciliation = reconcileLedger(ledger);
+  results.push({
+    id: "ledger_reconciliation",
+    name: "Authoritative Ledger Reconciliation",
+    category: "payment_safety",
+    passed: reconciliation.balanced,
+    evidence: reconciliation.balanced
+      ? `Ledger reconciled: ${ledger.totalCommittedEffects} committed effects and ${ledger.totalDuplicateEffects} duplicates`
+      : `LEDGER UNRECONCILED: unresolved operations [${reconciliation.unresolved.join(", ")}], committed=${ledger.totalCommittedEffects}, duplicates=${ledger.totalDuplicateEffects}`,
+    details: {
+      ...reconciliation,
+      totalCommittedEffects: ledger.totalCommittedEffects,
+      totalDuplicateEffects: ledger.totalDuplicateEffects,
+    },
+  });
+
+  const seenKeys = new Set<string>();
+  const repeatedKeys: string[] = [];
+  for (const entry of ledger.entries.values()) {
+    if (entry.idempotencyKey !== null) {
+      if (seenKeys.has(entry.idempotencyKey)) repeatedKeys.push(entry.idempotencyKey);
+      seenKeys.add(entry.idempotencyKey);
+    }
+  }
+  results.push({
+    id: "idempotency_key_integrity",
+    name: "Idempotency Key Integrity",
+    category: "idempotency",
+    passed: repeatedKeys.length === 0,
+    evidence: repeatedKeys.length === 0
+      ? "No committed effects share an idempotency key"
+      : `IDEMPOTENCY KEY REUSED FOR DISTINCT EFFECTS: ${repeatedKeys.join(", ")}`,
+    details: { repeatedKeys },
+  });
+
   const violatedInvariants = results.filter((r) => !r.passed).map((r) => r.id);
 
   // Also include any proven rules from the external invariant auditor (e.g. r04-network-idempotency, r03, r05)
   for (const finding of auditorFindings) {
-    if (finding.status === "proven" && !violatedInvariants.includes(finding.rule_id)) {
-      violatedInvariants.push(finding.rule_id);
+    if (finding.status === "proven") {
+      const ruleId = finding.rule_id;
+      if (ruleId && !violatedInvariants.includes(ruleId)) {
+        violatedInvariants.push(ruleId);
+      }
     }
   }
 

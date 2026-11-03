@@ -1,0 +1,105 @@
+{
+  "resourceSpans": [
+    {
+      "scopeSpans": [
+        {
+          "scope": { "name": "sample-service", "version": "1.0" },
+          "spans": [
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-checkout",
+              "name": "POST /checkout",
+              "startTimeUnixNano": "1793610000000000000",
+              "attributes": [
+                { "key": "http.request.method", "value": { "stringValue": "POST" } },
+                { "key": "http.route", "value": { "stringValue": "/checkout" } }
+              ]
+            },
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-db-acquire",
+              "parentSpanId": "span-checkout",
+              "name": "db.connection.acquire",
+              "startTimeUnixNano": "1793610000010000000",
+              "attributes": [
+                { "key": "db.connection.action", "value": { "stringValue": "acquire" } },
+                { "key": "db.system.name", "value": { "stringValue": "postgresql" } }
+              ]
+            },
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-db-write",
+              "parentSpanId": "span-checkout",
+              "name": "db.query",
+              "startTimeUnixNano": "1793610000020000000",
+              "attributes": [
+                { "key": "db.operation.name", "value": { "stringValue": "UPDATE" } },
+                { "key": "db.collection.name", "value": { "stringValue": "orders" } }
+              ]
+            },
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-payment-timeout",
+              "parentSpanId": "span-checkout",
+              "name": "HTTP POST payment API",
+              "startTimeUnixNano": "1793610000030000000",
+              "status": { "code": 2, "message": "deadline exceeded" },
+              "attributes": [
+                { "key": "http.request.method", "value": { "stringValue": "POST" } },
+                { "key": "http.response.status_code", "value": { "intValue": 504 } },
+                { "key": "error.type", "value": { "stringValue": "timeout" } }
+              ]
+            },
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-payment-retry",
+              "parentSpanId": "span-checkout",
+              "name": "payment retry attempt",
+              "startTimeUnixNano": "1793610000040000000",
+              "attributes": [
+                { "key": "retry.count", "value": { "intValue": 1 } },
+                { "key": "retry.attempt_of", "value": { "stringValue": "span-payment-timeout" } }
+              ]
+            },
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-model-call",
+              "parentSpanId": "span-checkout",
+              "name": "chat completion",
+              "startTimeUnixNano": "1793610000050000000",
+              "attributes": [
+                { "key": "gen_ai.operation.name", "value": { "stringValue": "chat" } },
+                { "key": "gen_ai.request.model", "value": { "stringValue": "example-model" } }
+              ]
+            },
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-lease-expiry",
+              "parentSpanId": "span-checkout",
+              "name": "lease.epoch_expired",
+              "startTimeUnixNano": "1793610000060000000",
+              "attributes": [
+                { "key": "alphabet.event.kind", "value": { "stringValue": "lease.epoch_expired" } },
+                { "key": "leaseId", "value": { "stringValue": "lease-db-pool-7" } },
+                { "key": "actorId", "value": { "stringValue": "orders-service" } },
+                { "key": "holderActorId", "value": { "stringValue": "checkout-worker-2" } },
+                { "key": "newEpoch", "value": { "intValue": 8 } }
+              ]
+            },
+            {
+              "traceId": "trace-sample-001",
+              "spanId": "span-custom-metric",
+              "parentSpanId": "span-checkout",
+              "name": "custom.metric.flush",
+              "startTimeUnixNano": "1793610000070000000",
+              "attributes": [
+                { "key": "metric.name", "value": { "stringValue": "queue_depth" } },
+                { "key": "metric.value", "value": { "intValue": 17 } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

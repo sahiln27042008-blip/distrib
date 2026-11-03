@@ -44,13 +44,23 @@ function loadCompilerPrompt(): string {
   return `You are the Causal Architecture Compiler. Ingest the system description and compile it into a workflow ID, human-readable name, and declared invariants based on the 10-letter causal alphabet.`;
 }
 
+function stableSlug(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!normalized) return "workflow";
+  let hash = 0;
+  for (let i = 0; i < normalized.length; i++) {
+    hash = (hash * 31 + normalized.charCodeAt(i)) >>> 0;
+  }
+  return `${normalized.slice(0, 20)}-${(hash % 100000).toString(36)}`;
+}
+
 function generateCannedWorkflow(description: string, userInvariants?: string[]): {
   id: string;
   name: string;
   declaredInvariants: string[];
 } {
   const lower = description.toLowerCase();
-  const slug = Math.random().toString(36).slice(2, 7);
+  const slug = stableSlug(description);
 
   if (
     lower.includes("stripe") ||
@@ -113,6 +123,9 @@ export const createWorkflowTool: McpTool = {
   inputSchema: {
     type: "object",
     properties: {
+      workflowId: { type: "string", description: "Optional explicit workflow identifier" },
+      name: { type: "string", description: "Display name for the workflow" },
+      description: { type: "string", description: "Optional workflow description" },
       systemDescription: {
         type: "string",
         description: "Documentation or description of the AI agent workflow architecture",
@@ -126,7 +139,22 @@ export const createWorkflowTool: McpTool = {
     required: ["systemDescription"],
   },
   async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
+    const explicitId = typeof args.workflowId === "string" && args.workflowId.trim() ? args.workflowId.trim() : undefined;
+    const explicitName = typeof args.name === "string" && args.name.trim() ? args.name.trim() : undefined;
+    const explicitDescription = typeof args.description === "string" ? args.description : undefined;
     const systemDescription = args.systemDescription as string | undefined;
+
+    if (explicitId && explicitName) {
+      const workflow = createWorkflow(explicitId, explicitName, [], explicitDescription);
+      return {
+        success: true,
+        workflowId: workflow.id,
+        name: explicitName,
+        description: explicitDescription,
+        declaredInvariants: workflow.declaredInvariants,
+        nodesCount: 0,
+      };
+    }
 
     if (
       !systemDescription ||
@@ -158,8 +186,6 @@ export const createWorkflowTool: McpTool = {
 
     try {
       const response = await orchestrator.chat(messages, []);
-
-      // If model returned JSON structure in reply
       if (response.text && response.text.trim().startsWith("{")) {
         try {
           const parsed = JSON.parse(response.text);
@@ -196,6 +222,7 @@ export const createWorkflowTool: McpTool = {
       name: workflow.name,
       declaredInvariants: workflow.declaredInvariants,
       workflow,
+      nodesCount: 0,
     };
   },
 };

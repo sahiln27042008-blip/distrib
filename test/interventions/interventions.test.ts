@@ -39,23 +39,31 @@ test("defines three known failure sequences", () => {
   );
 });
 
-test("double-charge-classic maps to C5 + E1 + F1", () => {
+test("double-charge-classic preserves resilient idempotency and recovery dials", () => {
   const sequence = KNOWN_FAILURE_SEQUENCES.find((item) => item.id === "double-charge-classic");
   assert.ok(sequence);
-  const config = interventionsToConfig(
-    { ...BASE_CONFIG, E: "E1_god_mode_main_thread" },
-    sequence.interventions,
-  );
-  assert.equal(config.C, "C5_legacy_erp_no_idem");
-  assert.equal(config.E, "E1_god_mode_main_thread");
-  assert.equal(config.F, "F1_blind_retry_unbounded_spend");
+  const config = interventionsToConfig(BASE_CONFIG, sequence.interventions);
+  assert.equal(config.C, "C2_socket_drop_2ms_late");
+  assert.equal(config.E, "E4_state_leases_ipc_worker");
+  assert.equal(config.F, "F3_resilient_invariant_runtime");
 });
 
-test("maps missing idempotency key to C5", () => {
+test("missing-key intervention does not replace the configured payment policy", () => {
+  const mapped = interventionsToConfig(BASE_CONFIG, [INTERVENTIONS.missing_idempotency_key]);
   assert.equal(
-    interventionsToConfig(BASE_CONFIG, [INTERVENTIONS.missing_idempotency_key]).C,
-    "C5_legacy_erp_no_idem",
+    mapped.C,
+    "C1_clean_20ms",
   );
+  assert.deepEqual(mapped.injectedInterventions, ["missing_idempotency_key"]);
+});
+
+test("state-loss and duplicate interventions preserve resilient recovery", () => {
+  for (const intervention of [INTERVENTIONS.lose_state, INTERVENTIONS.duplicate_request]) {
+    assert.equal(
+      interventionsToConfig(BASE_CONFIG, [intervention]).F,
+      "F3_resilient_invariant_runtime",
+    );
+  }
 });
 
 test("maps dropped response to C2", () => {
@@ -80,14 +88,14 @@ test("maps context bloat to D1", () => {
   );
 });
 
-test("composes multiple interventions while preserving legacy payment precedence", () => {
+test("composes interventions without replacing the configured payment policy", () => {
   const config = interventionsToConfig(BASE_CONFIG, [
     INTERVENTIONS.missing_idempotency_key,
     INTERVENTIONS.rate_limit,
     INTERVENTIONS.context_bloat,
     INTERVENTIONS.write_amplification,
   ]);
-  assert.equal(config.C, "C5_legacy_erp_no_idem");
+  assert.equal(config.C, "C3_rate_limit_429_brownout");
   assert.equal(config.D, "D1_raw_json_80k_flood");
   assert.equal(config.B, "B3_write_amp_15mb");
   assert.match(config.runId, /^experiment-\d+$/);
@@ -98,7 +106,7 @@ test("reverse-maps C5 and C2 payment dials", () => {
   assert.ok(configToInterventions({ ...BASE_CONFIG, C: "C2_socket_drop_2ms_late" }).includes("drop_response"));
 });
 
-test("reverse-maps the dial combinations used by the double-charge sequence", () => {
+test("reverse-maps only interventions represented by the effective dials", () => {
   const sequence = KNOWN_FAILURE_SEQUENCES.find((item) => item.id === "double-charge-classic");
   assert.ok(sequence);
   const config = interventionsToConfig(
@@ -108,8 +116,8 @@ test("reverse-maps the dial combinations used by the double-charge sequence", ()
   const inferred = configToInterventions(config);
   assert.ok(inferred.includes("missing_idempotency_key"));
   assert.ok(inferred.includes("kill_worker"));
-  assert.ok(inferred.includes("duplicate_request"));
-  assert.ok(inferred.includes("lose_state"));
+  assert.ok(!inferred.includes("duplicate_request"));
+  assert.ok(!inferred.includes("lose_state"));
 });
 
 test("composeSequence generates unique ids and stores hypothesis metadata", () => {

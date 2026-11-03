@@ -4,6 +4,7 @@
 import { Sim, Rng, type SimEvent } from "./kernel.ts";
 import { exportTrace, type Trace } from "./trace.ts";
 import { paymentBodyHash } from "./physics/mock-payment-gateway.ts";
+import type { InterventionType } from "./interventions/primitives.ts";
 import {
   MockPgPool,
   MockPaymentGateway,
@@ -35,6 +36,7 @@ export interface MatrixConfig {
   workflowSteps: number;
   saasPriceUsd: number;
   ticketValueUsd: number;
+  injectedInterventions?: InterventionType[];
 }
 
 export interface MatrixSnapshot {
@@ -456,7 +458,7 @@ export class MatrixScenario {
     } else if (this.config.C === "C4_bulk_50_poison_pill") {
       paymentPolicy = "poison_pill";
       batchPolicy = "poison_pill";
-      poisonIndex = 27;
+      poisonIndex = (workflowSteps <= 27) ? Math.max(1, Math.floor(workflowSteps / 2)) : 27;
     } else if (this.config.C === "C5_legacy_erp_no_idem") {
       paymentPolicy = "legacy_no_idem";
       batchPolicy = "legacy_no_idem";
@@ -530,7 +532,13 @@ export class MatrixScenario {
     for (let i = 0; i < tenantCount; i++) {
       const tenantName = TENANT_NAMES[i % TENANT_NAMES.length]!;
       this.sim.at(i * 10, `workflow.${i}.start`, () => {
-        this.runOneWorkflow(i, tenantName, cfg.workflowSteps, cfg.budgetUsd);
+        const executionId = `workflow-${this.config.runId}-${this.config.seed}-${i}`;
+        const executionEventId = this.sim.emit("workflow.execution.started", `tenant-${i}`, {
+          execution_id: executionId,
+          tenant: tenantName,
+          declared_budget: this.config.ticketValueUsd,
+        });
+        this.runOneWorkflow(i, tenantName, cfg.workflowSteps, cfg.budgetUsd, executionId, executionEventId);
       });
     }
 
@@ -550,7 +558,14 @@ export class MatrixScenario {
     });
   }
 
-  private runOneWorkflow(index: number, tenant: string, steps: number, budgetUsd?: number): void {
+  private runOneWorkflow(
+    index: number,
+    tenant: string,
+    steps: number,
+    budgetUsd: number | undefined,
+    executionId: string,
+    executionEventId: string,
+  ): void {
     let cumulativeCost = 0;
     let isLightweight = false;
     let replaysUsed = 0;
@@ -597,8 +612,16 @@ export class MatrixScenario {
         { id: 2, name: "charge_customer", category: "Billing", requiredPermission: "billing:write", relevanceKeywords: ["charge"] },
         { id: 3, name: "batch_ops", category: "Operations", requiredPermission: "ops:write", relevanceKeywords: ["batch"] },
       ];
-      const llmResp = this.llm.respond(prompt, dummyTools, turn + 1, { query: prompt, tenant });
-      const callCost = (llmResp.totalTokens * 0.00003) * (isLightweight ? 0.5 : 1.0);
+      const costMultiplier = isLightweight ? 0.5 : 1.0;
+      const llmResp = this.llm.respond(prompt, dummyTools, turn + 1, {
+        query: prompt,
+        tenant,
+        executionId,
+        executionEventId,
+        startedAtMs: this.sim.now,
+        costMultiplier,
+      });
+      const callCost = (llmResp.totalTokens * 0.00003) * costMultiplier;
       cumulativeCost += callCost;
 
       // Stage 3: supervisor.callTool
@@ -635,11 +658,12 @@ export class MatrixScenario {
       const stableKey = `idem-${this.config.runId}-${index}-${turn}`;
       const freshKey = `idem-${this.config.runId}-${index}-${turn}-att0`;
       const useStableKey = this.config.F === "F3_resilient_invariant_runtime" || this.config.F === "F5_graceful_handoff_cascade";
-      const hasIdempotency = this.payment.policy !== "legacy_no_idem";
+      const hasIdempotency = this.payment.policy !== "legacy_no_idem" &&
+        !this.config.injectedInterventions?.includes("missing_idempotency_key");
       const paymentKey = hasIdempotency ? (useStableKey ? stableKey : freshKey) : null;
       const candidateReceipt = `receipt-${this.config.runId}-${index}-${turn}`;
 
-      const payRes = this.payment.accept(paymentKey, amount, candidateReceipt, { payload });
+      const payRes = this.payment.accept(paymentKey, amount, candidateReceipt, { payload, itemIndex: turn, tenantIndex: index, sagaId: `saga-${index}` });
       if (payRes.error) {
         stepFailed = true;
         if (payRes.error === "ECONNRESET" && (hasIdempotency || this.config.F !== "F3_resilient_invariant_runtime")) {
@@ -647,14 +671,22 @@ export class MatrixScenario {
           const retryKey = hasIdempotency
             ? (useStableKey ? stableKey : `idem-${this.config.runId}-${index}-${turn}-retry`)
             : null;
-          this.payment.accept(retryKey, amount, `${candidateReceipt}-retry`, { payload });
+          this.payment.accept(retryKey, amount, `${candidateReceipt}-retry`, { payload, tenantIndex: index, sagaId: `saga-${index}` });
         }
         if (this.config.F === "F2_ask_llm_to_undo") {
-          this.llm.respond("undo the previous charge", dummyTools, turn + 1, { query: "undo previous charge" });
+          this.llm.respond("undo the previous charge", dummyTools, turn + 1, {
+            query: "undo previous charge",
+            tenant,
+            executionId,
+            executionEventId,
+            startedAtMs: this.sim.now,
+            costMultiplier,
+          });
           this.orphansLeft = 1;
           this.sim.emit("saga.compensation", `tenant-${index}`, {
-            saga_id: `saga-${index}-${turn}`,
-            compensation_for_body_hash: paymentBodyHash(payload),
+            saga_id: `saga-${index}`,
+            tenant_index: index,
+            compensation_for_body_hash: paymentBodyHash({ tenant, turn: turn > 0 ? turn - 1 : turn, amountDollars: amount }),
             compensation_missing: true,
             error: "LLM undo did not execute a compensating payment",
           });
@@ -819,6 +851,32 @@ export class MatrixScenario {
         span.attrs.attempt_of = retryLink.spanId;
       }
     }
+    const rootSpanId = `s-run-${this.config.runId}-${this.config.seed}`;
+    const startMs = trace.spans.length > 0
+      ? Math.min(...trace.spans.map((span) => span.startMs))
+      : 0;
+    const endMs = trace.spans.length > 0
+      ? Math.max(...trace.spans.map((span) => span.endMs))
+      : startMs;
+    for (const span of trace.spans) {
+      if (span.parentSpanId === null) span.parentSpanId = rootSpanId;
+    }
+    trace.spans.unshift({
+      spanId: rootSpanId,
+      parentSpanId: null,
+      name: "matrix.run",
+      startMs,
+      endMs,
+      status: "ok",
+      attrs: {
+        declared_budget: this.config.ticketValueUsd * this.dialToPhysicsConfig().tenantCount,
+        budget_per_workflow: this.config.ticketValueUsd,
+        workflow_count: this.dialToPhysicsConfig().tenantCount,
+        budget_scope: "all_workflows_in_matrix_run",
+      },
+      links: [],
+      events: [],
+    });
     return trace;
   }
 }

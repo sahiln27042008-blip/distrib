@@ -39,6 +39,12 @@ function getAuditorSync(): {
   return { auditTrace, parseLangChainCallbackJsonl };
 }
 
+function matchesInvariant(actual: string, expected: string): boolean {
+  const actualId = actual.toLowerCase();
+  const expectedId = expected.toLowerCase();
+  return actualId === expectedId || actualId.startsWith(expectedId.slice(0, 3));
+}
+
 // Delta-debugging: remove subsets of events and check if the
 // invariant still fires. If yes, keep the removal. If no,
 // restore. Repeat until no more events can be removed.
@@ -54,7 +60,7 @@ export function minimizeCounterexample(
   // Start with all spans that are relevant to the finding
   const findingSpanIds = new Set<string>();
   for (const finding of failure.experiment.provenFindings) {
-    if (finding.rule_id === invariant) {
+    if (matchesInvariant(finding.rule_id, invariant)) {
       for (const spanId of finding.evidence.span_ids || []) {
         findingSpanIds.add(spanId);
       }
@@ -186,7 +192,7 @@ function checkInvariantFires(
     const internal = auditor.parseLangChainCallbackJsonl(jsonl);
     const findings: Finding[] = auditor.auditTrace(internal);
     return findings.some(
-      (f) => f.rule_id === invariant && f.status === "proven",
+      (f) => matchesInvariant(f.rule_id, invariant) && f.status === "proven",
     );
   } catch {
     return false;

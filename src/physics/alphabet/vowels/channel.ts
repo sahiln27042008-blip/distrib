@@ -1,9 +1,18 @@
 // enterpriseee/enterprise-simulator/src/physics/alphabet/vowels/channel.ts
 
+import { createHash } from "node:crypto";
 import type { Sim } from "../../../kernel.ts";
 import type { Vowel } from "../types.ts";
 import type { Cell } from "./cell.ts";
 import type { Lease } from "./lease.ts";
+
+function canonJson(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonJson).join(",")}]`;
+  const o = v as Record<string, unknown>;
+  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonJson(o[k])}`).join(",")}}`;
+}
 
 export type ChannelPhase =
   | "REQUEST_SENT"
@@ -23,6 +32,8 @@ export interface ChannelConfig {
   targetActorId: string;
   timeoutMs: number;
   retryPolicy?: ChannelRetryPolicy;
+  idempotencyEnabled?: boolean;
+  budgetUsd?: number;
   sim?: Sim;
 }
 
@@ -32,6 +43,7 @@ export interface ChannelSendOpts {
   dedupKey?: string;
   epoch?: number;
   heldLease?: Lease;
+  workflowId?: string;
   mutateFn?: () => unknown;
   autoAdvance?: boolean;
 }
@@ -51,9 +63,15 @@ export class Channel implements Vowel {
   readonly targetActorId: string;
   readonly timeoutMs: number;
   readonly retryPolicy: ChannelRetryPolicy;
+  readonly budgetUsd?: number;
+  idempotencyEnabled: boolean;
 
+  receiptLedger = new Map<string, { targetCommitted: boolean; receipt?: unknown; committedAt: number }>();
   sim?: Sim;
   currentPhase: ChannelPhase = "CALLER_OBSERVATION";
+  private totalCost = 0;
+  private sendCount = 0;
+  private costBurnEmitted = false;
 
   constructor(config: ChannelConfig) {
     this.id = config.id;
@@ -62,6 +80,11 @@ export class Channel implements Vowel {
     this.targetActorId = config.targetActorId;
     this.timeoutMs = config.timeoutMs;
     this.retryPolicy = config.retryPolicy ?? { maxRetries: 0 };
+    this.idempotencyEnabled = config.idempotencyEnabled ?? false;
+    if (config.budgetUsd !== undefined && (!Number.isFinite(config.budgetUsd) || config.budgetUsd < 0)) {
+      throw new RangeError("budgetUsd must be a finite number >= 0");
+    }
+    this.budgetUsd = config.budgetUsd;
     this.sim = config.sim;
   }
 
@@ -74,6 +97,16 @@ export class Channel implements Vowel {
     const delayMs = opts?.delayMs ?? 0;
     const severPhase = opts?.severPhase;
     const startTime = sim.now;
+
+    // Attach deterministic composite header when channel idempotency is enabled:
+    // Idempotency-Key: sha256(workflow_id + node_id + payload_hash)
+    let dedupKey = opts?.dedupKey;
+    if (this.idempotencyEnabled && !dedupKey) {
+      const payloadHash = createHash("sha256").update(canonJson(payload)).digest("hex");
+      const workflowId = opts?.workflowId ?? "wf";
+      const nodeId = this.sourceActorId;
+      dedupKey = `sha256(${workflowId}+${nodeId}+${payloadHash})`;
+    }
 
     const outcome: {
       callerObservation: "ok" | "timeout" | "error" | "pending";
@@ -96,7 +129,25 @@ export class Channel implements Vowel {
       payload,
       sentAt: startTime,
       timeoutMs: this.timeoutMs,
+      idempotencyKey: dedupKey,
     });
+
+    this.sendCount++;
+    const amount = payload && typeof payload === "object" && "amount" in payload && typeof payload.amount === "number" && Number.isFinite(payload.amount)
+      ? payload.amount
+      : 0;
+    this.totalCost += Math.max(0, amount);
+    const threshold = this.budgetUsd === undefined ? undefined : this.budgetUsd * 100;
+    if (threshold !== undefined && this.totalCost > threshold && !this.costBurnEmitted) {
+      this.costBurnEmitted = true;
+      sim.emit("cost.burn_exceeded", "cost-tracker", {
+        totalCost: this.totalCost,
+        threshold,
+        channelId: this.id,
+        sendCount: this.sendCount,
+        budgetUsd: this.budgetUsd,
+      });
+    }
 
     // Schedule caller timeout handler
     sim.at(this.timeoutMs, "channel.timeout_handler", () => {
@@ -143,17 +194,42 @@ export class Channel implements Vowel {
 
         // Phase 3: TARGET_MUTATION
         this.currentPhase = "TARGET_MUTATION";
-        if (targetCell) {
+        if (this.idempotencyEnabled && dedupKey && this.receiptLedger.has(dedupKey)) {
+          // Channel-level transport deduplication:
+          // Remote endpoint evaluates key in its receipt ledger; suppresses duplicate side effect
+          const cached = this.receiptLedger.get(dedupKey)!;
+          outcome.targetCommitted = cached.targetCommitted;
+          sim.emit("channel.dedup_suppressed", this.id, {
+            channelId: this.id,
+            idempotencyKey: dedupKey,
+            targetActorId: this.targetActorId,
+            cachedCommittedAt: cached.committedAt,
+          });
+          sim.emit("channel.mutate", this.id, {
+            channelId: this.id,
+            targetCellId: targetCell?.id,
+            mutationSuccess: cached.targetCommitted,
+            duplicate: true,
+            staleEpoch: false,
+          });
+        } else if (targetCell) {
           const mutRes = targetCell.mutate(
             payload,
             {
-              dedupKey: opts?.dedupKey,
+              dedupKey,
               epoch: opts?.epoch,
               sim,
             },
             sim,
           );
           outcome.targetCommitted = mutRes.ok;
+          if (this.idempotencyEnabled && dedupKey) {
+            this.receiptLedger.set(dedupKey, {
+              targetCommitted: mutRes.ok,
+              receipt: mutRes,
+              committedAt: sim.now,
+            });
+          }
           sim.emit("channel.mutate", this.id, {
             channelId: this.id,
             targetCellId: targetCell.id,
@@ -164,12 +240,24 @@ export class Channel implements Vowel {
         } else if (opts?.mutateFn) {
           opts.mutateFn();
           outcome.targetCommitted = true;
+          if (this.idempotencyEnabled && dedupKey) {
+            this.receiptLedger.set(dedupKey, {
+              targetCommitted: true,
+              committedAt: sim.now,
+            });
+          }
           sim.emit("channel.mutate", this.id, {
             channelId: this.id,
             mutationSuccess: true,
           });
         } else {
           outcome.targetCommitted = true;
+          if (this.idempotencyEnabled && dedupKey) {
+            this.receiptLedger.set(dedupKey, {
+              targetCommitted: true,
+              committedAt: sim.now,
+            });
+          }
           sim.emit("channel.mutate", this.id, {
             channelId: this.id,
             mutationSuccess: true,
@@ -239,6 +327,10 @@ export class Channel implements Vowel {
       targetActorId: this.targetActorId,
       timeoutMs: this.timeoutMs,
       retryPolicy: { ...this.retryPolicy },
+      idempotencyEnabled: this.idempotencyEnabled,
+      budgetUsd: this.budgetUsd,
+      totalCost: this.totalCost,
+      sendCount: this.sendCount,
       currentPhase: this.currentPhase,
     };
   }

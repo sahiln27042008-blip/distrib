@@ -5,11 +5,20 @@ export interface SubstrateAssignment {
   params: Record<string, unknown>;
 }
 
+export interface ConsonantAssignment {
+  kind: "DELAY" | "SEVER" | "DUPLICATE" | "SATURATE" | "WIPE" | "CORRUPT"
+    | "TIMING" | "OMISSION" | "DUPLICATION" | "CRASH_AMNESIA" | "BYZANTINE";
+  params: Record<string, unknown>;
+}
+
 export interface WorkflowNode {
   index: number;
+  nodeId?: string;
   nodeName: string;
   nodeDescription?: string;
   substrates: SubstrateAssignment[];
+  consonants?: ConsonantAssignment[];
+  outboundEdges?: string[];
   metadata?: Record<string, unknown>;
 }
 
@@ -73,9 +82,12 @@ export function isWorkflowOwnedBySession(workflowId: string, sessionId: string):
 export function insertNode(
   workflowId: string,
   nodeData: {
+    nodeId?: string;
     nodeName: string;
     nodeDescription?: string;
     substrates: SubstrateAssignment[];
+    consonants?: ConsonantAssignment[];
+    outboundEdges?: string[];
     metadata?: Record<string, unknown>;
   },
 ): {
@@ -92,9 +104,12 @@ export function insertNode(
   const nextIndex = workflow.nodes.length + 1;
   const node: WorkflowNode = {
     index: nextIndex,
+    ...(nodeData.nodeId ? { nodeId: nodeData.nodeId } : {}),
     nodeName: nodeData.nodeName,
     nodeDescription: nodeData.nodeDescription ?? "",
     substrates: Array.isArray(nodeData.substrates) ? nodeData.substrates : [],
+    ...(nodeData.consonants ? { consonants: nodeData.consonants } : {}),
+    ...(nodeData.outboundEdges ? { outboundEdges: nodeData.outboundEdges } : {}),
     ...(nodeData.metadata ? { metadata: nodeData.metadata } : {}),
   };
 

@@ -6,6 +6,23 @@ export type ConsonantFault = {
   params: Record<string, unknown>;
 };
 
+export interface Finding {
+  rule_id: string;
+  pillar: string;
+  status: "proven" | "unknown" | "not_evaluated";
+  severity: "critical" | "warning" | "info";
+  message: string;
+  evidence: {
+    span_ids: string[];
+    resource?: string;
+    hashes?: string[];
+    gap_ms?: number;
+    details?: Record<string, unknown>;
+  };
+  repro: string;
+  suggested_fix: string;
+}
+
 export interface SearchNode {
   faultSequence: ConsonantFault[];
   depth: number;
@@ -49,6 +66,7 @@ export type CollapseCliffStatus =
 export interface CollapseCliffResult {
   status: CollapseCliffStatus;
   parameter: string;
+  testedRange: { low: number; high: number };
   lowerSafeBound?: number;
   upperFailureBound?: number;
   estimatedThreshold?: number;

@@ -18,11 +18,12 @@ import { verifyFixTool } from "./tools/verify-fix.ts";
 import { replayTool } from "./tools/replay.ts";
 import { runScientistTool } from "./tools/run-scientist.ts";
 import { runGateTool } from "./tools/run-gate.ts";
-import { causalAuditTool } from "./tools/causal-audit.ts";
+import { causalAuditTool, auditWorkflowReliabilityTool } from "./tools/causal-audit.ts";
 import { causalCliffTool } from "./tools/causal-cliff.ts";
 import { causalVerifyTool } from "./tools/causal-verify.ts";
 import { createWorkflowTool } from "./tools/create-workflow.ts";
 import { insertNodeTool } from "./tools/insert-node.ts";
+import { auditWorkflowReliabilityCompatTool } from "./tools/workflow-tools.ts";
 
 export const MCP_PROMPT_INSTRUCTIONS = SYSTEM_PROMPT;
 
@@ -37,7 +38,7 @@ export const TOOLS: McpTool[] = [
   replayTool,
   runScientistTool,
   runGateTool,
-  causalAuditTool,
+  auditWorkflowReliabilityTool,
   causalCliffTool,
   causalVerifyTool,
   createWorkflowTool,
@@ -397,7 +398,26 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
               { "Mcp-Session-Id": session.id }
             );
           } catch (err: any) {
-            replyRpcError(500, -32000, err.message || "Tool execution failed");
+            replyRpcResult(
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      success: false,
+                      validationError: true,
+                      error: err.message || "Tool execution failed",
+                      expectedSchema: (tool as any)?.inputSchema,
+                    }),
+                  },
+                ],
+                success: false,
+                validationError: true,
+                error: err.message || "Tool execution failed",
+                expectedSchema: (tool as any)?.inputSchema,
+              },
+              { "Mcp-Session-Id": session.id }
+            );
           }
           return;
         }

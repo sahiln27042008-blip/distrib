@@ -26,6 +26,11 @@ export interface OrchestratorResponse {
   text: string; // assistant message text (may be empty if tool_calls present)
   tool_calls: ToolCall[]; // empty if just text
   stop_reason: "stop" | "tool_calls" | "length" | "error";
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
 }
 
 export interface Orchestrator {

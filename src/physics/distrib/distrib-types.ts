@@ -11,6 +11,69 @@ export type DistribSearchStatus =
   | "BUDGET_EXHAUSTED"
   | "INSUFFICIENT_PHYSICS";
 
+export type BusinessState =
+  | "PENDING"
+  | "COMMITTED"
+  | "COMPLETED"
+  | "FAILED"
+  | "UNKNOWN";
+
+export interface LedgerEntry {
+  operationId: string;
+  accountId: string;
+  amountCents: number;
+  committedAt: number;
+  acknowledgedAt: number | null;
+  state: BusinessState;
+  idempotencyKey: string | null;
+  duplicateOf: string | null;
+}
+
+export interface OperationLedger {
+  entries: Map<string, LedgerEntry>;
+  totalCommittedEffects: number;
+  totalDuplicateEffects: number;
+}
+
+export interface QueueBacklog {
+  arrivalRatePerMs: number;
+  holdDurationMs: number;
+  maxPoolCapacity: number;
+  maxQueueDepth: number;
+  activeLeases: number;
+  queuedWaiters: Array<{
+    callerId: string;
+    enqueuedAt: number;
+    deadlineMs: number;
+  }>;
+  totalStarved: number;
+  total504Errors: number;
+}
+
+export interface LittleLawMetrics {
+  avgHoldMs: number;
+  p99HoldMs: number;
+  dbCpuPct: number;
+  poolUtilizationPct: number;
+}
+
+export interface InDoubtState {
+  phase: "PRE_COMMIT" | "COMMITTED" | "ACK_SENT" | "ACK_LOST" | "IN_DOUBT" | "REPLAYED";
+  committedAt: number | null;
+  ackLostAt: number | null;
+  retryReceived: boolean;
+  retryIdempotencyKey: string | null;
+  duplicateMutation: boolean;
+}
+
+export interface IdempotentOperation {
+  operationId: string;
+  accountId: string;
+  idempotencyKey: string | null;
+  attemptNumber: number;
+  parentOperationId: string | null;
+}
+
 export interface DistribConsonantFault {
   consonantKind: ConsonantKind;
   targetVowelId: string;

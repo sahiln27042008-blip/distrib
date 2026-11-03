@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { OrchestratorMessage } from "../src/llm/orchestrator.ts";
 import { MetaClient } from "../src/llm/meta-client.ts";
 
 test("MetaClient preserves Gemini thought signatures across tool-call turns", async () => {
@@ -49,9 +50,9 @@ test("MetaClient preserves Gemini thought signatures across tool-call turns", as
       baseUrl: "https://example.test/v1",
       model: "test-model",
     });
-    const messages = [
-      { role: "system" as const, content: "test" },
-      { role: "user" as const, content: "call tool" },
+    const messages: OrchestratorMessage[] = [
+      { role: "system", content: "test" },
+      { role: "user", content: "call tool" },
     ];
 
     const firstResponse = await client.chat(messages, []);

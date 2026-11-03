@@ -52,6 +52,27 @@ export function exportTrace(events: SimEvent[], traceId: string, derived: Record
         attrs: { corr: e.corr, ...e.data },
         events: events.filter((x) => x.kind === "state.transition").map((x) => ({ t: x.t, name: "state.transition", attrs: x.data })),
       });
+    } else if (e.kind === "workflow.execution.started") {
+      spans.push({
+        ...base,
+        parentSpanId: rootId,
+        name: "workflow.execution",
+        startMs: e.t,
+        endMs: lastT,
+        status: "ok",
+        attrs: { ...e.data },
+      });
+    } else if (e.kind === "model_call") {
+      const startMs = typeof e.data.started_at_ms === "number" ? e.data.started_at_ms : e.t;
+      spans.push({
+        ...base,
+        parentSpanId: e.parent ? sid(e.parent) : rootId,
+        name: "model_call",
+        startMs,
+        endMs: startMs,
+        status: "ok",
+        attrs: { ...e.data },
+      });
     } else if (e.kind === "account.call") {
       const res = events.find((x) => x.kind === "account.result" && x.parent === e.id);
       spans.push({ ...base, parentSpanId: rootId, name: "account.lookup", startMs: e.t, endMs: res ? res.t : e.t, status: res ? "ok" : "unfinished", attrs: res ? { ...res.data } : {} });
@@ -105,10 +126,16 @@ export function exportTrace(events: SimEvent[], traceId: string, derived: Record
 
   for (const event of events) {
     if (event.kind !== "saga.compensation" || typeof event.data.compensation_for_body_hash !== "string") continue;
+    const compensationSpan = spans.find((span) => span.spanId === sid(event.id));
     for (const span of spans) {
       if (span.name !== "payment.attempt" || span.attrs.body_hash !== event.data.compensation_for_body_hash) continue;
+      if (event.data.tenant_index !== undefined && span.attrs.tenant_index !== undefined && span.attrs.tenant_index !== event.data.tenant_index) continue;
       if (typeof event.data.saga_id === "string") span.attrs.saga_id = event.data.saga_id;
       span.attrs.compensation_required = true;
+      if (compensationSpan) {
+        compensationSpan.attrs.compensation_for = span.spanId;
+        break;
+      }
     }
   }
 

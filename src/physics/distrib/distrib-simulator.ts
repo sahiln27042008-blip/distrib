@@ -1,5 +1,6 @@
 // enterpriseee/enterprise-simulator/src/physics/distrib/distrib-simulator.ts
 
+import { createHash } from "node:crypto";
 import { Sim } from "../../kernel.ts";
 import { Cell } from "../alphabet/vowels/cell.ts";
 import { Lease } from "../alphabet/vowels/lease.ts";
@@ -12,6 +13,12 @@ import type {
   DistribExecutionResult,
 } from "./distrib-types.ts";
 import { evaluateDistribInvariants } from "./distrib-invariants.ts";
+import {
+  createDistribWorld,
+  processPayment,
+  reconcileLedger,
+  sampleLeaseQueue,
+} from "./distrib-world.ts";
 import { convertAlphabetEventsToLangChainJsonl, resolveAuditor } from "../search/execute-faults.ts";
 
 export async function executeDistribWorkflow(
@@ -20,6 +27,7 @@ export async function executeDistribWorkflow(
   seed = 42,
 ): Promise<DistribExecutionResult> {
   const sim = new Sim(seed);
+  const businessWorld = createDistribWorld();
 
   const cellMap = new Map<string, Cell>();
   const leaseMap = new Map<string, Lease>();
@@ -134,8 +142,10 @@ export async function executeDistribWorkflow(
   const currentLockEpoch = redisLock?.currentEpoch ?? 0;
 
   // Cache idempotency key in Redis volatile cache
-  redisCacheCell?.mutate({ cachedKeys: { "task-100": { key: "idem-task-100", epoch: currentLockEpoch } } }, { sim });
-  pgIdempotencyCell?.mutate({ records: { "task-100": { key: "idem-task-100" } } }, { sim });
+  const paymentOperationId = `payment-${seed}-task-100-charge`;
+  const paymentIdempotencyKey = createHash("sha256").update(paymentOperationId).digest("hex");
+  redisCacheCell?.mutate({ cachedKeys: { "task-100": { key: paymentIdempotencyKey, epoch: currentLockEpoch } } }, { sim });
+  pgIdempotencyCell?.mutate({ records: { "task-100": { key: paymentIdempotencyKey } } }, { sim });
 
   // Step 5: LLM Gateway Invocation
   const llmChannel = channelMap.get("chan-llm-gateway");
@@ -172,6 +182,14 @@ export async function executeDistribWorkflow(
   const paymentChannel = channelMap.get("chan-payment");
   const paymentLedger = cellMap.get("cell-payment-ledger");
   const paymentFaults = channelFaults.filter((f) => f.targetVowelId === paymentChannel?.id);
+  const longHoldFault = paymentFaults.find(
+    (fault) =>
+      fault.consonantKind === "DELAY" &&
+      Number(fault.params.durationMs) > 1000,
+  );
+  if (pgPool && longHoldFault) {
+    sampleLeaseQueue(businessWorld, pgPool, sim, Number(longHoldFault.params.durationMs));
+  }
 
   let paymentSucceeded = false;
   const paymentPayload = {
@@ -181,6 +199,9 @@ export async function executeDistribWorkflow(
     customerId: "cust-900",
     channelId: paymentChannel?.id ?? "chan-payment",
   };
+  const effectiveIdempotencyKey = paymentLedger?.idempotencyEnforced
+    ? paymentIdempotencyKey
+    : null;
 
   if (paymentChannel && paymentLedger) {
     if (paymentFaults.length > 0) {
@@ -192,7 +213,7 @@ export async function executeDistribWorkflow(
           {
             targetCell: paymentLedger,
             payload: paymentPayload,
-            dedupKey: "idem-task-100",
+            dedupKey: paymentIdempotencyKey,
             ...fault.params,
           },
           sim.rng,
@@ -209,7 +230,37 @@ export async function executeDistribWorkflow(
           res.details?.phase === "POST_COMMIT" ||
           fault.consonantKind === "SEVER";
 
-        if (timeoutOccurred) {
+        const firstAttempt = ((res.details as any)?.channelResult ?? res.details) as {
+          targetCommitted?: boolean;
+          ackReceived?: boolean;
+        } | undefined;
+        if (firstAttempt?.targetCommitted) {
+          businessWorld.virtualTimeMs = sim.now;
+          businessWorld.inDoubtState.committedAt = sim.now;
+          businessWorld.inDoubtState.phase = "COMMITTED";
+          if (firstAttempt.ackReceived) {
+            businessWorld.inDoubtState.phase = "ACK_SENT";
+          } else {
+            businessWorld.inDoubtState.ackLostAt = sim.now;
+            businessWorld.inDoubtState.phase = "ACK_LOST";
+            businessWorld.inDoubtState.phase = "IN_DOUBT";
+          }
+          processPayment(
+            businessWorld,
+            {
+              operationId: paymentOperationId,
+              accountId: "cust-900",
+              idempotencyKey: effectiveIdempotencyKey,
+              attemptNumber: 1,
+              parentOperationId: null,
+            },
+            50000,
+            firstAttempt.ackReceived ?? !timeoutOccurred,
+          );
+        }
+
+        if (timeoutOccurred && paymentChannel.retryPolicy.maxRetries > 0) {
+          businessWorld.inDoubtState.retryReceived = true;
           sim.emit("channel.retry", paymentChannel.id, {
             channelId: paymentChannel.id,
             retryAttempt: 1,
@@ -221,7 +272,8 @@ export async function executeDistribWorkflow(
           const cachedKey = cacheState.cachedKeys?.["task-100"]?.key;
 
           // If cache was wiped (C5) or provider un-enforced, retry dedup key is omitted
-          const retryDedupKey = paymentLedger.idempotencyEnforced ? (cachedKey ?? "idem-task-100") : undefined;
+          const retryDedupKey = paymentLedger.idempotencyEnforced ? (cachedKey ?? paymentIdempotencyKey) : undefined;
+          businessWorld.inDoubtState.retryIdempotencyKey = retryDedupKey ?? null;
 
           // Target cell receives retry through channel send
           const retrySendRes = paymentChannel.send(sim, paymentPayload, paymentLedger, {
@@ -230,15 +282,52 @@ export async function executeDistribWorkflow(
           if (retrySendRes.targetCommitted) {
             paymentSucceeded = true;
           }
+          if (retrySendRes.targetCommitted || retrySendRes.ackReceived) {
+            businessWorld.virtualTimeMs = sim.now;
+            const retryResult = processPayment(
+              businessWorld,
+              {
+                operationId: paymentOperationId,
+                accountId: "cust-900",
+                idempotencyKey: retryDedupKey ?? null,
+                attemptNumber: 2,
+                parentOperationId: paymentOperationId,
+              },
+              50000,
+              retrySendRes.ackReceived,
+            );
+            if (retryResult.duplicate) {
+              businessWorld.inDoubtState.duplicateMutation = true;
+            } else if (!retrySendRes.targetCommitted && retrySendRes.ackReceived) {
+              businessWorld.inDoubtState.phase = "REPLAYED";
+            } else if (retrySendRes.ackReceived) {
+              businessWorld.inDoubtState.phase = "ACK_SENT";
+            }
+          }
         }
       }
     } else {
       // Normal payment execution
       const res = paymentChannel.send(sim, paymentPayload, paymentLedger, {
-        dedupKey: "idem-task-100",
+        dedupKey: effectiveIdempotencyKey ?? undefined,
       });
       if (res.targetCommitted) {
         paymentSucceeded = true;
+      }
+      if (res.targetCommitted) {
+        businessWorld.virtualTimeMs = sim.now;
+        processPayment(
+          businessWorld,
+          {
+            operationId: paymentOperationId,
+            accountId: "cust-900",
+            idempotencyKey: effectiveIdempotencyKey,
+            attemptNumber: 1,
+            parentOperationId: null,
+          },
+          50000,
+          res.ackReceived,
+        );
       }
     }
   }
@@ -301,9 +390,24 @@ export async function executeDistribWorkflow(
     });
 
     // Replay repeats payment operation through channel!
-    paymentChannel?.send(sim, paymentPayload, paymentLedger, {
-      dedupKey: paymentLedger?.idempotencyEnforced ? "idem-task-100" : undefined,
+    const recoveryResult = paymentChannel?.send(sim, paymentPayload, paymentLedger, {
+      dedupKey: paymentLedger?.idempotencyEnforced ? paymentIdempotencyKey : undefined,
     });
+    if (recoveryResult?.targetCommitted || recoveryResult?.ackReceived) {
+      businessWorld.virtualTimeMs = sim.now;
+      processPayment(
+        businessWorld,
+        {
+          operationId: paymentOperationId,
+          accountId: "cust-900",
+          idempotencyKey: paymentLedger?.idempotencyEnforced ? paymentIdempotencyKey : null,
+          attemptNumber: 2,
+          parentOperationId: paymentOperationId,
+        },
+        50000,
+        recoveryResult.ackReceived,
+      );
+    }
   }
 
   // Step 10: Result Delivery & Notification
@@ -342,6 +446,11 @@ export async function executeDistribWorkflow(
     leases: leaseMap,
     logs: logMap,
     auditorFindings,
+    ledger: businessWorld.ledger,
+    operationStates: businessWorld.operationStates,
+    queueBacklog: businessWorld.queueBacklog,
+    littleLawMetrics: businessWorld.littleLawMetrics,
+    inDoubtState: businessWorld.inDoubtState,
   });
 
   return {
@@ -353,6 +462,16 @@ export async function executeDistribWorkflow(
       cells: Object.fromEntries(Array.from(cellMap.entries()).map(([k, v]) => [k, v.state])),
       leases: Object.fromEntries(Array.from(leaseMap.entries()).map(([k, v]) => [k, { load: v.currentLoad, epoch: v.currentEpoch }])),
       logs: Object.fromEntries(Array.from(logMap.entries()).map(([k, v]) => [k, { count: v.entries.length }])),
+      ledger: {
+        entries: Array.from(businessWorld.ledger.entries.values()),
+        totalCommittedEffects: businessWorld.ledger.totalCommittedEffects,
+        totalDuplicateEffects: businessWorld.ledger.totalDuplicateEffects,
+        reconciliation: reconcileLedger(businessWorld.ledger),
+      },
+      operationStates: Object.fromEntries(businessWorld.operationStates.entries()),
+      queueBacklog: businessWorld.queueBacklog,
+      littleLawMetrics: businessWorld.littleLawMetrics,
+      inDoubtState: businessWorld.inDoubtState,
     },
   };
 }

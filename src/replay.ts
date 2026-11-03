@@ -74,6 +74,7 @@ function isValidDial(value: unknown): value is string {
 
 function isValidMatrixConfig(value: unknown): value is MatrixConfig {
   if (!isRecord(value)) return false;
+  const record = value as Record<string, unknown>;
   const keys: Array<keyof MatrixConfig> = [
     "seed",
     "runId",
@@ -91,18 +92,18 @@ function isValidMatrixConfig(value: unknown): value is MatrixConfig {
     "ticketValueUsd",
   ];
 
-  if (!keys.every((key) => key in value)) return false;
-  if (!isValidSeed(value.seed)) return false;
-  if (typeof value.runId !== "string" || value.runId.length === 0) return false;
-  if (!isValidDial(value.A) || !isValidDial(value.B) || !isValidDial(value.C) || !isValidDial(value.D) || !isValidDial(value.E) || !isValidDial(value.F)) {
+  if (!keys.every((key) => key in record)) return false;
+  if (!isValidSeed(record.seed)) return false;
+  if (typeof record.runId !== "string" || record.runId.length === 0) return false;
+  if (!isValidDial(record.A) || !isValidDial(record.B) || !isValidDial(record.C) || !isValidDial(record.D) || !isValidDial(record.E) || !isValidDial(record.F)) {
     return false;
   }
-  if (!Number.isInteger(value.humanUsers) || value.humanUsers < 0) return false;
-  if (!Number.isInteger(value.concurrentAgents) || value.concurrentAgents < 0) return false;
-  if (!Number.isInteger(value.dbPoolSize) || value.dbPoolSize <= 0) return false;
-  if (!Number.isInteger(value.workflowSteps) || value.workflowSteps <= 0) return false;
-  if (!Number.isFinite(value.saasPriceUsd) || value.saasPriceUsd < 0) return false;
-  if (!Number.isFinite(value.ticketValueUsd) || value.ticketValueUsd < 0) return false;
+  if (!Number.isInteger(record.humanUsers) || Number(record.humanUsers) < 0) return false;
+  if (!Number.isInteger(record.concurrentAgents) || Number(record.concurrentAgents) < 0) return false;
+  if (!Number.isInteger(record.dbPoolSize) || Number(record.dbPoolSize) <= 0) return false;
+  if (!Number.isInteger(record.workflowSteps) || Number(record.workflowSteps) <= 0) return false;
+  if (!Number.isFinite(record.saasPriceUsd) || Number(record.saasPriceUsd) < 0) return false;
+  if (!Number.isFinite(record.ticketValueUsd) || Number(record.ticketValueUsd) < 0) return false;
   return true;
 }
 

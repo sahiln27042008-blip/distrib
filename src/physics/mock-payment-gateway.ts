@@ -18,6 +18,8 @@ export interface AcceptOptions {
   payload?: Record<string, unknown>;
   /** poison_pill: position of this charge in its batch. */
   itemIndex?: number;
+  tenantIndex?: number;
+  sagaId?: string;
 }
 
 export interface AcceptResult {
@@ -46,6 +48,8 @@ interface AttemptRecord {
   retryCount: number;
   attemptOf?: number;
   outcome: "accepted" | "replayed" | "conn_reset" | "rate_limited" | "poisoned";
+  tenantIndex?: number;
+  sagaId?: string;
 }
 
 const RATE_LIMIT_P = 0.5;
@@ -108,6 +112,8 @@ export class MockPaymentGateway {
       amountDollars,
       retryCount: sameBody.length,
       outcome: "accepted",
+      tenantIndex: opts.tenantIndex,
+      sagaId: opts.sagaId,
     };
     if (last) rec.attemptOf = last.index;
     this.attempts.push(rec);
@@ -169,6 +175,8 @@ export class MockPaymentGateway {
         retry_count: a.retryCount,
         amountDollars: a.amountDollars,
         outcome: a.outcome,
+        ...(a.tenantIndex !== undefined ? { tenant_index: a.tenantIndex } : {}),
+        ...(a.sagaId !== undefined ? { saga_id: a.sagaId } : {}),
       };
       if (a.attemptOf !== undefined) {
         const prior = this.emitted.get(a.attemptOf);

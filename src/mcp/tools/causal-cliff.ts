@@ -102,6 +102,7 @@ export const causalCliffTool: McpTool = {
         status: cliff.status,
         scenarioId: scenario?.id ?? workflow?.id,
         targetChannel,
+        testedRange: cliff.testedRange,
         cliffMs,
         safeMs: cliff.lowerSafeBound,
         collapseMs: cliff.upperFailureBound,
