@@ -80,6 +80,34 @@ DISTRIB runs 100% locally and air-gapped without requiring external paid APIs:
 ### Option 3: Offline Deterministic Testing
 If no model keys or URLs are specified, the simulator automatically falls back to `MockOrchestrator` using seeded deterministic responses. Zero external network calls are made.
 
+---
+
+## 📁 Instant Evaluation via Preloaded Clinical Case Study
+
+For hackathon judges and evaluators who want to inspect the system immediately without typing prompts:
+
+1. Start DISTRIB: `pnpm dev` (opens on `http://localhost:3000`).
+2. In the top navbar, click **`Import data`** and select the included **`casestudysample.json`** file.
+3. This instantly loads the complete, full-fidelity **St. Brigid Clinical Chartline (12-node topology)** session:
+   - **Full Chat & Evidence Trace**: View the complete multi-turn architecture investigation, evidence extraction across Epic FHIR, Pyxis med dispenser, Redis, and Postgres, and timeout constraints.
+   - **Interactive Canvas**: Pan and zoom across the 12-node causal graph.
+   - **Failure Counterexample**: Inspect the **`[ GATE: BLOCKED ]`** breach on `mirth-interface → pyxis-adc` proving the 9 extra Pyxis vends.
+   - **Unified Diff & Verified Repair**: Open the **Diff** tab and click **`Apply repair & Re-verify`** to watch the engine re-simulate the 4-ablation compound repair and transition the gate to **`[ GATE: APPROVED ]`** with zero regressions!
+
+---
+
+## 📖 Evaluator Quick-Start User Manual (30-Second Walkthrough)
+
+| Step | Action on `http://localhost:3000` | What Happens / What to Observe |
+| :---: | :--- | :--- |
+| **1** | Click **`Import data`** in the top bar $\to$ select `casestudysample.json` | Instantly populates the 12-node St. Brigid clinical architecture, conversation history, and telemetry. |
+| **2** | In the floating workbench, click **`Real-World Chaos`** $\to$ click **`Run Fault Explorer`** | Bounded search runs in `< 15ms`; node turns red, and the badge pulses **`[ GATE: BLOCKED ]`** with minimal counterexample trace. |
+| **3** | In the left panel, switch to the **`Diff`** tab | View the synthesized unified git diff (zero-hold lease release, idempotency key, and admission control). |
+| **4** | Click **`Apply repair & Re-verify`** | The patch is applied and re-simulated against the exact counterexample under Seed 42817. Status flips to **`[ GATE: APPROVED ]`** with green checkmark! |
+| **5** | Click **`Export report`** in the top bar | Downloads the executive Markdown reliability audit report detailing verified healthcare economics ($8,000 SLA credit, $59.60 direct physical loss, 0 patient harm). |
+
+---
+
 ## Setup and Verification (Windows PowerShell)
 
 ```powershell
