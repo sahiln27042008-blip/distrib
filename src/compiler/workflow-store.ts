@@ -1,5 +1,10 @@
 // enterpriseee/enterprise-simulator/src/compiler/workflow-store.ts
 
+export function normalizeSubstrateVowel(value: string | undefined): string {
+  const normalized = String(value ?? "").trim().toUpperCase();
+  return normalized === "REGISTER" ? "CELL" : normalized;
+}
+
 export interface SubstrateAssignment {
   vowel: "REGISTER" | "CELL" | "LOG" | "LEASE" | "CHANNEL" | string;
   params: Record<string, unknown>;
@@ -43,6 +48,15 @@ export function createWorkflow(
   name: string,
   declaredInvariants: string[] = [],
   systemDescription?: string,
+  initialNodes?: Array<{
+    nodeId?: string;
+    nodeName: string;
+    nodeDescription?: string;
+    substrates?: SubstrateAssignment[];
+    consonants?: ConsonantAssignment[];
+    outboundEdges?: string[];
+    metadata?: Record<string, unknown>;
+  }>,
 ): Workflow {
   let uniqueId = id;
   let suffix = 2;
@@ -59,6 +73,26 @@ export function createWorkflow(
     updatedAt: now,
     ...(systemDescription ? { systemDescription } : {}),
   };
+
+  if (Array.isArray(initialNodes)) {
+    for (const [idx, n] of initialNodes.entries()) {
+      workflow.nodes.push({
+        index: idx + 1,
+        ...(n.nodeId ? { nodeId: n.nodeId } : {}),
+        nodeName: n.nodeName,
+        nodeDescription: n.nodeDescription ?? "",
+        substrates: Array.isArray(n.substrates)
+          ? n.substrates.map((substrate) => ({
+              ...substrate,
+              vowel: normalizeSubstrateVowel(substrate.vowel),
+            }))
+          : [],
+        ...(n.consonants ? { consonants: n.consonants } : {}),
+        ...(n.outboundEdges ? { outboundEdges: n.outboundEdges } : {}),
+        ...(n.metadata ? { metadata: n.metadata } : {}),
+      });
+    }
+  }
 
   store.set(uniqueId, workflow);
   return workflow;
@@ -107,7 +141,12 @@ export function insertNode(
     ...(nodeData.nodeId ? { nodeId: nodeData.nodeId } : {}),
     nodeName: nodeData.nodeName,
     nodeDescription: nodeData.nodeDescription ?? "",
-    substrates: Array.isArray(nodeData.substrates) ? nodeData.substrates : [],
+    substrates: Array.isArray(nodeData.substrates)
+      ? nodeData.substrates.map((substrate) => ({
+          ...substrate,
+          vowel: normalizeSubstrateVowel(substrate.vowel),
+        }))
+      : [],
     ...(nodeData.consonants ? { consonants: nodeData.consonants } : {}),
     ...(nodeData.outboundEdges ? { outboundEdges: nodeData.outboundEdges } : {}),
     ...(nodeData.metadata ? { metadata: nodeData.metadata } : {}),
@@ -147,3 +186,110 @@ export function clearWorkflows(): void {
   workflowsBySession.clear();
 }
 
+
+
+/**
+ * Connects two existing nodes in a workflow by adding toNode to fromNode's outboundEdges.
+ * Allows wiring edges in any order, even after nodes are created.
+ */
+export function connectNodes(
+  workflowId: string,
+  fromNode: string,
+  toNode: string,
+  channelParams?: Record<string, unknown>,
+): {
+  workflowId: string;
+  fromNode: string;
+  toNode: string;
+  outboundEdges: string[];
+} {
+  const workflow = store.get(workflowId);
+  if (!workflow) {
+    throw new Error(`Workflow with ID '${workflowId}' not found.`);
+  }
+
+  const source = workflow.nodes.find(
+    (n) => n.nodeName === fromNode || n.nodeId === fromNode || String(n.index) === fromNode
+  );
+  if (!source) {
+    throw new Error(`Source node '${fromNode}' not found in workflow '${workflowId}'.`);
+  }
+
+  source.outboundEdges = source.outboundEdges ?? [];
+  if (!source.outboundEdges.includes(toNode)) {
+    source.outboundEdges.push(toNode);
+  }
+
+  if (channelParams) {
+    source.metadata = source.metadata ?? {};
+    source.metadata.channelParams = {
+      ...((source.metadata.channelParams as Record<string, unknown>) ?? {}),
+      [toNode]: channelParams,
+    };
+  }
+
+  workflow.updatedAt = Date.now();
+
+  return {
+    workflowId,
+    fromNode: source.nodeName,
+    toNode,
+    outboundEdges: source.outboundEdges,
+  };
+}
+
+/**
+ * Updates or patches an existing node's substrates, consonants, or outboundEdges.
+ */
+export function updateNode(
+  workflowId: string,
+  nodeId: string,
+  patch: {
+    substrates?: SubstrateAssignment[];
+    consonants?: ConsonantAssignment[];
+    outboundEdges?: string[];
+    nodeDescription?: string;
+    metadata?: Record<string, unknown>;
+  },
+): {
+  workflowId: string;
+  node: WorkflowNode;
+} {
+  const workflow = store.get(workflowId);
+  if (!workflow) {
+    throw new Error(`Workflow with ID '${workflowId}' not found.`);
+  }
+
+  const node = workflow.nodes.find(
+    (n) => n.nodeName === nodeId || n.nodeId === nodeId || String(n.index) === nodeId
+  );
+  if (!node) {
+    throw new Error(`Node '${nodeId}' not found in workflow '${workflowId}'.`);
+  }
+
+  if (Array.isArray(patch.substrates)) {
+    node.substrates = patch.substrates.map((substrate) => ({
+      ...substrate,
+      vowel: normalizeSubstrateVowel(substrate.vowel),
+    }));
+  }
+  if (Array.isArray(patch.consonants)) {
+    node.consonants = patch.consonants;
+  }
+  if (Array.isArray(patch.outboundEdges)) {
+    node.outboundEdges = patch.outboundEdges;
+  }
+  if (typeof patch.nodeDescription === 'string') {
+    node.nodeDescription = patch.nodeDescription;
+  }
+  if (patch.metadata && typeof patch.metadata === 'object') {
+    node.metadata = { ...(node.metadata ?? {}), ...patch.metadata };
+  }
+
+  workflow.updatedAt = Date.now();
+
+  return {
+    workflowId,
+    node,
+  };
+}

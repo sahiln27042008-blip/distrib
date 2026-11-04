@@ -124,7 +124,7 @@ test("tools/call with insert_node adds a node to the workflow", async () => {
           workflowId,
           nodeName: "Stripe Payment Gateway",
           nodeDescription: "Executes refund settlement",
-          substrates: [{ vowel: "CHANNEL", params: { timeoutMs: 8000 } }],
+          substrates: [{ vowel: "CHANNEL", params: { timeoutMs: 8000, idempotencyEnabled: false } }],
         },
       },
       sessionId,

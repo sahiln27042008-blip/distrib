@@ -1,6 +1,6 @@
 import type { MatrixConfig } from "../matrix-copy.ts";
 
-export type GateStatus = "APPROVED" | "BLOCKED" | "INSUFFICIENT_EVIDENCE";
+export type GateStatus = "COVERAGE_REPORT" | "APPROVED" | "BLOCKED" | "INSUFFICIENT_EVIDENCE";
 
 export interface GateEvidence {
   discoveredFailures: Array<{

@@ -40,6 +40,7 @@ export interface ChannelConfig {
 export interface ChannelSendOpts {
   delayMs?: number;
   severPhase?: "PRE_COMMIT" | "POST_COMMIT";
+  retryAttempt?: number;
   dedupKey?: string;
   epoch?: number;
   heldLease?: Lease;
@@ -130,6 +131,7 @@ export class Channel implements Vowel {
       sentAt: startTime,
       timeoutMs: this.timeoutMs,
       idempotencyKey: dedupKey,
+      ...(opts?.retryAttempt !== undefined ? { retryAttempt: opts.retryAttempt } : {}),
     });
 
     this.sendCount++;

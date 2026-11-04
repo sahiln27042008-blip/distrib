@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { clearWorkflows, createWorkflow, getWorkflow } from "../src/compiler/workflow-store.ts";
-import { insertNodeTool } from "../src/mcp/tools/insert-node.ts";
+import { clearWorkflows, createWorkflow, getWorkflow, insertNode } from "../src/compiler/workflow-store.ts";
 import { causalAuditTool, workflowToGraph } from "../src/mcp/tools/causal-audit.ts";
 import { causalCliffTool } from "../src/mcp/tools/causal-cliff.ts";
 import { executeFaultSequence } from "../src/physics/search/execute-faults.ts";
@@ -106,10 +105,7 @@ async function ensureWorkflowFromFixture(fixture: any) {
       ...(node.consonants ? { consonants: node.consonants } : {}),
       ...(node.outboundEdges ? { outboundEdges: node.outboundEdges } : {}),
     };
-    const result = await insertNodeTool.handler(payload);
-    if (!result.success) {
-      throw new Error((result.error as string) || "insert node failed");
-    }
+    insertNode(workflowId, payload);
   }
 
   return { workflowId, modelGap: false, reason: null };

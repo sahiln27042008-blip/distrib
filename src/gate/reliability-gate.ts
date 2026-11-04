@@ -115,20 +115,10 @@ export async function runReliabilityGate(request: GateRequest): Promise<GateEvid
     }
   }
 
-  let status: GateStatus;
-  let reason: string;
-  if (scientistResult.experimentsRun === 0) {
-    status = "INSUFFICIENT_EVIDENCE";
-    reason = "No experiments completed, so the system could not be evaluated.";
-  } else if (discoveredFailures.length > 0 || scientistResult.provenFindingsTotal > 0) {
-    status = "BLOCKED";
-    reason = discoveredFailures.length > 0
-      ? `${discoveredFailures.length} proven failure(s) were discovered. Generated or simulator-verified patches do not change the submitted system configuration.`
-      : `${scientistResult.provenFindingsTotal} proven finding(s) were reported but did not match a generated hypothesis; the gate will not approve an unresolved result.`;
-  } else {
-    status = "APPROVED";
-    reason = `No invariant violations were discovered across ${scientistResult.experimentsRun} adversarial experiments.`;
-  }
+  const reason = scientistResult.experimentsRun === 0
+    ? "No calibration experiments completed."
+    : `Coverage report: ${scientistResult.experimentsRun} calibration experiments executed, ${discoveredFailures.length} candidate failure(s) exercised, ${scientistResult.provenFindingsTotal} findings recorded. Matrix is a coverage harness; the Causal Alphabet engine is the sole verdict authority.`;
+  const status: GateStatus = "COVERAGE_REPORT";
 
   return {
     discoveredFailures,

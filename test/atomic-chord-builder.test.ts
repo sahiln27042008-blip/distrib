@@ -70,7 +70,7 @@ test("atomic chord builder and deterministic audit", async () => {
   assert.ok(compiledGraph.candidatePerturbations.some((candidate) =>
     candidate.consonant.kind === "DELAY" &&
     candidate.consonant.durationMs === 30_000 &&
-    candidate.targetId === "llm_streamer-log"
+    candidate.targetId === "vowel-3-1"
   ));
 
   const result1 = await auditWorkflowReliability({ workflowId: WORKFLOW_ID, seed: 42817, maxDepth: 2 });

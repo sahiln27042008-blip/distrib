@@ -24,6 +24,7 @@ export interface ToolDefinition {
 
 export interface OrchestratorResponse {
   text: string; // assistant message text (may be empty if tool_calls present)
+  reasoning?: string; // model thinking / reasoning tokens
   tool_calls: ToolCall[]; // empty if just text
   stop_reason: "stop" | "tool_calls" | "length" | "error";
   usage?: {

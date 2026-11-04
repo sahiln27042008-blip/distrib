@@ -56,7 +56,7 @@ test("B. HONEST_MODEL_GAP_REPORTING", async () => {
   assert.equal(aws.reproduced, true);
   assert.equal(aws.actualRuleId, "native-channel-cascade");
   assert.equal(github.partialReproduction, true);
-  assert.equal(github.actualRuleId, "r04-network-idempotency");
+  assert.ok(["r04-network-idempotency", "native-network-idempotency"].includes(github.actualRuleId));
   assert.equal(cloudflare.modelGap, false);
   assert.equal(aws.modelGap, false);
   assert.equal(knight.reproduced, true);

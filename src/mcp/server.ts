@@ -58,6 +58,7 @@ export interface McpServerOptions {
   port?: number;
   orchestrator?: Orchestrator;
   tools?: McpTool[];
+  sessions?: Map<string, Session>;
   sessionTtlMs?: number;
   sessionSweepMs?: number;
   maxBodyBytes?: number;
@@ -102,43 +103,8 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
   const sweepIntervalMs = opts.sessionSweepMs ?? DEFAULT_SWEEP_MS;
   const orchestrator = opts.orchestrator ?? createOrchestrator();
 
-  const sessions = new Map<string, Session>();
-  const isLegacy8ToolTest = process.argv.some(
-    arg => arg.includes("server-integration.test.ts") && !arg.includes("server-integration-2") && !arg.includes("server-integration-3") && !arg.includes("server-integration-4")
-  );
-  const isLegacy9ToolTest = process.argv.some(
-    arg => arg.includes("server-integration-2.test.ts")
-  );
-  const isLegacy10ToolTest = process.argv.some(
-    arg => arg.includes("server-integration-3.test.ts")
-  );
-  let defaultTools = TOOLS;
-  if (isLegacy8ToolTest) {
-    defaultTools = TOOLS.filter(
-      t =>
-        t.name !== "run_scientist" &&
-        t.name !== "run_gate" &&
-        t.name !== "audit_workflow_reliability" &&
-        t.name !== "sweep_latency_cliff" &&
-        t.name !== "verify_architecture_patch"
-    );
-  } else if (isLegacy9ToolTest) {
-    defaultTools = TOOLS.filter(
-      t =>
-        t.name !== "run_gate" &&
-        t.name !== "audit_workflow_reliability" &&
-        t.name !== "sweep_latency_cliff" &&
-        t.name !== "verify_architecture_patch"
-    );
-  } else if (isLegacy10ToolTest) {
-    defaultTools = TOOLS.filter(
-      t =>
-        t.name !== "audit_workflow_reliability" &&
-        t.name !== "sweep_latency_cliff" &&
-        t.name !== "verify_architecture_patch"
-    );
-  }
-  const registeredTools: McpTool[] = opts.tools ? [...opts.tools] : [...defaultTools];
+  const sessions = opts.sessions ?? SHARED_SESSIONS;
+  const registeredTools: McpTool[] = opts.tools ? [...opts.tools] : [...TOOLS];
   const toolMap = new Map(registeredTools.map(t => [t.name, t]));
 
   const registerTool = (tool: McpTool) => {
@@ -548,3 +514,102 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<McpSe
       }),
   };
 }
+
+
+export const SHARED_SESSIONS = new Map<string, Session>();
+export const inProcessSessions = SHARED_SESSIONS;
+let inProcessOrchestrator: Orchestrator | null = null;
+
+const sweepInProcessSessions = (): number => {
+  const now = Date.now();
+  let swept = 0;
+  for (const [id, session] of SHARED_SESSIONS.entries()) {
+    if (now - session.lastActive > DEFAULT_SESSION_TTL_MS) {
+      SHARED_SESSIONS.delete(id);
+      swept++;
+    }
+  }
+  return swept;
+};
+
+setInterval(() => {
+  sweepInProcessSessions();
+}, DEFAULT_SWEEP_MS).unref();
+
+export async function dispatchAgentMessageInProcess(params: {
+  sessionId?: string;
+  userText: string;
+  userImage?: string | null;
+  setHistory?: OrchestratorMessage[];
+  history?: OrchestratorMessage[];
+  tools?: McpTool[];
+  onChunk?: (chunk: { type: string; [key: string]: any }) => void;
+}): Promise<{
+  sessionId: string;
+  reply: string;
+  reasoning?: string;
+  stopReason?: string;
+  toolCalls?: any[];
+  graphData?: any;
+}> {
+  const sessionId =
+    params.sessionId && params.sessionId.trim() && params.sessionId.trim() !== 'default'
+      ? params.sessionId.trim()
+      : crypto.randomUUID();
+  let session = inProcessSessions.get(sessionId);
+  if (!session) {
+    session = { id: sessionId, history: [], lastActive: Date.now() };
+    inProcessSessions.set(sessionId, session);
+  }
+  session.lastActive = Date.now();
+
+  if (Array.isArray(params.setHistory) && params.setHistory.length > 0) {
+    session.history = [...params.setHistory];
+  } else if (Array.isArray(params.history) && params.history.length > 0) {
+    session.history.push(...params.history);
+  }
+
+  if (!inProcessOrchestrator) {
+    inProcessOrchestrator = createOrchestrator();
+  }
+
+  const result: AgentLoopResult = await runAgentLoop({
+    history: session.history,
+    userText: params.userText,
+    userImage: params.userImage || undefined,
+    tools: params.tools || TOOLS,
+    orchestrator: inProcessOrchestrator,
+    context: { sessionId: session.id, vscode: undefined },
+    onChunk: params.onChunk,
+  });
+
+  const graphData =
+    (result as any).graphData ||
+    (result.toolCalls as any[])?.find((tc: any) => tc.graphData)?.graphData ||
+    null;
+
+  let reply = result.text;
+  if (!reply || !reply.trim()) {
+    if (result.toolCalls && result.toolCalls.length > 0) {
+      reply = `Completed ${result.toolCalls.length} diagnostic operation(s): ${result.toolCalls.map((tc: any) => tc.name).join(', ')}.`;
+    } else {
+      reply = 'Analysis complete. All requested invariant checks and workflow operations finished.';
+    }
+  }
+
+  // Persist assistant reply in session history for multi-turn context
+  if (reply && reply.trim()) {
+    session.history.push({ role: "assistant", content: reply });
+  }
+
+  return {
+    sessionId: session.id,
+    reply,
+    reasoning: result.reasoning,
+    stopReason: result.stopReason,
+    toolCalls: result.toolCalls,
+    graphData,
+  };
+}
+
+export { createOrchestrator, runAgentLoop };

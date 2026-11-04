@@ -51,7 +51,7 @@ test("insert_node adds nodes in sequence 1, 2, 3", async () => {
       },
       {
         vowel: "CHANNEL",
-        params: { id: "chan-ingress", timeoutMs: 5000 },
+        params: { id: "chan-ingress", timeoutMs: 5000, idempotencyEnabled: false },
       },
     ],
   });
@@ -91,7 +91,7 @@ test("insert_node adds nodes in sequence 1, 2, 3", async () => {
     substrates: [
       {
         vowel: "CHANNEL",
-        params: { id: "chan-payment", timeoutMs: 8000, retryPolicy: { maxRetries: 2 } },
+        params: { id: "chan-payment", timeoutMs: 8000, retryPolicy: { maxRetries: 2 }, idempotencyEnabled: true },
       },
       {
         vowel: "REGISTER",
@@ -125,7 +125,7 @@ test("getWorkflow returns all nodes with substrates", async () => {
     workflowId,
     nodeName: "Node B",
     nodeDescription: "Second node",
-    substrates: [{ vowel: "CHANNEL", params: { id: "chan-tool", timeoutMs: 4000 } }],
+    substrates: [{ vowel: "CHANNEL", params: { id: "chan-tool", timeoutMs: 4000, idempotencyEnabled: false } }],
   });
 
   const workflow = getWorkflow(workflowId);
@@ -140,6 +140,21 @@ test("getWorkflow returns all nodes with substrates", async () => {
   assert.equal(workflow.nodes[1]?.index, 2);
   assert.equal(workflow.nodes[1]?.nodeName, "Node B");
   assert.equal(workflow.nodes[1]?.substrates[0]?.vowel, "CHANNEL");
+});
+
+test("insert_node validates evidence on every channel substrate", async () => {
+  const initRes = await createWorkflowTool.handler({ systemDescription: "Multi-channel workflow" });
+  const result = await insertNodeTool.handler({
+    workflowId: initRes.workflowId,
+    nodeName: "Multi-channel gateway",
+    substrates: [
+      { vowel: "CHANNEL", params: { timeoutMs: 3000, idempotencyEnabled: true } },
+      { vowel: "CHANNEL", params: { timeoutMs: 5000 } },
+    ],
+  });
+
+  assert.equal(result.success, false);
+  assert.match(String(result.error), /CHANNEL requires idempotencyEnabled/i);
 });
 
 test("Tools handle missing workflowId gracefully", async () => {

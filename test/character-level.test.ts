@@ -98,7 +98,7 @@ test("E. COMPOSITION: multiple consonants are pinned to the node and determinist
   const insertResult = await insertNodeTool.handler({
     workflowId,
     nodeName: "AI",
-    substrates: [{ vowel: "REGISTER", params: {} }, { vowel: "CHANNEL", params: { targetNodeId: "Stripe", timeoutMs: 3000 } }],
+    substrates: [{ vowel: "REGISTER", params: {} }, { vowel: "CHANNEL", params: { targetNodeId: "Stripe", timeoutMs: 3000, idempotencyEnabled: false } }],
     consonants: [
       { kind: "OMISSION", params: { phase: "ACK" } },
       { kind: "SATURATE", params: { loadUnits: 5 } },
@@ -133,7 +133,7 @@ test("F. DIFFERENT EXECUTION: idempotency changes the execution result", async (
   await insertNodeTool.handler({
     workflowId: workflowAId,
     nodeName: "AI",
-    substrates: [{ vowel: "CHANNEL", params: { targetNodeId: "Stripe", timeoutMs: 3000 } }],
+    substrates: [{ vowel: "CHANNEL", params: { targetNodeId: "Stripe", timeoutMs: 3000, idempotencyEnabled: false } }],
     consonants: [{ kind: "OMISSION", params: { phase: "ACK" } }],
     outboundEdges: ["Stripe"],
   });
@@ -151,7 +151,7 @@ test("F. DIFFERENT EXECUTION: idempotency changes the execution result", async (
   await insertNodeTool.handler({
     workflowId: workflowBId,
     nodeName: "AI",
-    substrates: [{ vowel: "CHANNEL", params: { targetNodeId: "Stripe", timeoutMs: 3000 } }],
+    substrates: [{ vowel: "CHANNEL", params: { targetNodeId: "Stripe", timeoutMs: 3000, idempotencyEnabled: false } }],
     consonants: [{ kind: "OMISSION", params: { phase: "ACK" } }],
     outboundEdges: ["Stripe"],
   });

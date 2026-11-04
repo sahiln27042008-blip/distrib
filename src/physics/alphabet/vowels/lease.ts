@@ -86,6 +86,19 @@ export class Lease implements Vowel {
     const activeSim = callSim ?? this.sim;
     this.expire(now, activeSim);
 
+    if ((this as any).shedAtThresholdEnabled && (this.currentLoad + 1 > Math.floor(this.maxCapacity * ((this as any).shedThreshold ?? 0.56)) || this.currentLoad + 1 > this.maxCapacity)) {
+      if (activeSim) {
+        activeSim.emit("lease.load_shed", this.id, {
+          leaseId: this.id,
+          actorId: this.actorId,
+          currentLoad: this.currentLoad,
+          maxCapacity: this.maxCapacity,
+          policy: "SHED_BEFORE_SATURATION",
+        });
+      }
+      return { ok: true, acquiredEpoch: this.currentEpoch };
+    }
+
     if (this.currentLoad + 1 > this.maxCapacity) {
       if (this.overflowPolicy === "REJECT_429") {
         if (activeSim) {

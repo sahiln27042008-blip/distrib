@@ -1,8 +1,31 @@
+<div align="center">
+  <img src="logo.png" alt="DISTRIB Logo" width="120" style="border-radius: 12px; margin-bottom: 12px;" />
+  <h1>DISTRIB</h1>
+  <p><strong>Deterministic Distributed Reliability & Invariant Verification Engine for AI-Powered Infrastructure</strong></p>
+</div>
+
+---
+
 # enterprise-simulator
 
 Standalone deterministic simulator for a refund workflow, M6 enterprise queue/worker/resource scenarios, M7 Enterprise Chaos Lab, and M8 LLM Agent Context Lab. All infrastructure is simulated.
 
 **Everything is simulated.** The virtual clock, mock services, and in-memory SQLite do not measure real infrastructure. The app, demo, and default tests need no credentials, paid APIs, or cloud services. Dependency installation may contact the npm registry; after installation, the simulator itself makes no external network requests. Server tests verify that test traffic stays on loopback.
+
+## System Architecture & Verdict Authority
+
+![DISTRIB System Architecture](architecture.png)
+
+> ### ⚠️ Critical Architectural Distinction: Single Source of Truth
+> **The Causal Alphabet Engine is the SOLE Verdict Authority. The Matrix track is a regression testbed only.**
+
+| Layer | Role | Verdict Authority | Output |
+| :--- | :--- | :---: | :--- |
+| **Causal Alphabet Engine**<br/>(`audit_workflow_reliability`, `verify_architecture_patch`) | **The Core Engine & Sole Decision Authority**.<br/>Compiles topologies into formal substrates (Cell, Lease, Log, Channel), explores physical fault permutations (Drop, Delay, Reorder, Duplicate, Corrupt, Saturate, Crash, Partition), and executes adversarial counterexample replay. | **SOLE AUTHORITY** | **`APPROVED`** or **`BLOCKED`** with minimal counterexample trace & cryptographic evidence pack. |
+| **Matrix Track (v1)**<br/>(`gate/reliability-gate.ts`, dials A–F) | **Calibration & Regression Testbed**.<br/>Provides empirical 6-dial trace baselines and regression calibration. | **NO VERDICT AUTHORITY** | **`COVERAGE_REPORT`** (experiments run, findings count, span telemetry). |
+| **Autonomous AI Scientist**<br/>(`src/scientist/`) | **Hypothesis Discovery Loop**.<br/>Fully migrated to the Alphabet track via `matrixToGraph()`. Evaluates hypotheses and minimizes counterexamples directly through `searchFaults()` and `auditNative()`. | **Delegates to Alphabet** | Proven invariant discoveries & minimized counterexample sequences. |
+
+---
 
 ## Requirements
 
@@ -10,6 +33,32 @@ Standalone deterministic simulator for a refund workflow, M6 enterprise queue/wo
 - **Node 18 / 20 are NOT supported** (no built-in `node:sqlite`, no native TypeScript). Check with `node -v`.
 - Runtime has **zero third-party dependencies**. `typescript` and `@types/node` are development dependencies used by typecheck.
 - Windows, macOS, Linux. Docker not needed.
+
+## Local & Air-Gapped Model Setup (Ollama / vLLM / LM Studio)
+
+DISTRIB runs 100% locally and air-gapped without requiring external paid APIs:
+
+### Option 1: Local Ollama (Zero data leaves your machine)
+1. Install and run Ollama (https://ollama.ai):
+   ```bash
+   ollama run llama3.3
+   ```
+2. Configure environment variables in `.env` or `.env.local`:
+   ```env
+   META_BASE_URL="http://localhost:11434/v1"
+   META_MODEL="llama3.3"
+   META_API_KEY="ollama"
+   ```
+
+### Option 2: Local vLLM / LM Studio / LocalAI
+   ```env
+   META_BASE_URL="http://localhost:8000/v1"
+   META_MODEL="meta-llama/Llama-3.3-70B-Instruct"
+   META_API_KEY="none"
+   ```
+
+### Option 3: Offline Deterministic Testing
+If no model keys or URLs are specified, the simulator automatically falls back to `MockOrchestrator` using seeded deterministic responses. Zero external network calls are made.
 
 ## Setup and Verification (Windows PowerShell)
 

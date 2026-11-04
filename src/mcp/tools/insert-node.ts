@@ -171,6 +171,21 @@ export const insertNodeTool: McpTool = {
       params: typeof s.params === "object" && s.params !== null ? s.params : {},
     }));
 
+    const channelSubstrates = substrates.filter((s) => String(s.vowel).toUpperCase() === "CHANNEL");
+    const invalidChannel = channelSubstrates.some((channel) => {
+      const params = channel.params as Record<string, unknown>;
+      const hasIdempotency =
+        typeof params.idempotencyEnabled === "boolean" ||
+        typeof params.idempotencyKey === "boolean";
+      return !hasIdempotency || typeof params.timeoutMs !== "number";
+    });
+    if (invalidChannel) {
+      return {
+        success: false,
+        error: "CHANNEL requires idempotencyEnabled (boolean) and timeoutMs (number). Ask the user: does this external API support idempotency keys? What is the timeout?",
+      };
+    }
+
     let normalizedConsonants: ConsonantAssignment[] | undefined;
     const rawConsonants = normalized.consonants;
     if (Array.isArray(rawConsonants)) {

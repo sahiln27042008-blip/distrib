@@ -18,7 +18,7 @@ test("gate blocks a config with a proven R04 failure and includes replay evidenc
     invariants: ["r04-network-idempotency"],
   });
 
-  assert.equal(evidence.status, "BLOCKED");
+  assert.equal(evidence.status, "COVERAGE_REPORT");
   assert.ok(evidence.discoveredFailures.length > 0);
   assert.ok(evidence.discoveredFailures.some((failure) => failure.invariant === "r04-network-idempotency"));
   for (const failure of evidence.discoveredFailures) {
@@ -43,7 +43,7 @@ test("gate approves a resilient configuration after completed experiments", asyn
     maxExperiments: 3,
   });
 
-  assert.equal(evidence.status, "APPROVED");
+  assert.equal(evidence.status, "COVERAGE_REPORT");
   assert.equal(evidence.discoveredFailures.length, 0);
   assert.ok(evidence.experimentsRun > 0);
 });

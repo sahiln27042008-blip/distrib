@@ -16,7 +16,7 @@
       "matchedRuleId": true,
       "matchedDepth": true,
       "matchedCliff": true,
-      "actualRuleId": "r04-network-idempotency",
+      "actualRuleId": "native-network-idempotency",
       "actualDepth": 1,
       "actualCliffMs": 42993.5,
       "actualCounterexample": [
@@ -25,11 +25,14 @@
           "targetVowelId": "vowel-1-1",
           "params": {
             "phase": "POST_COMMIT"
-          }
+          },
+          "targetName": "primary-east → primary-west",
+          "businessTarget": "primary-east → primary-west",
+          "description": "SEVER affects primary-east → primary-west [vowel-1-1]"
         }
       ],
       "modelGap": false,
-      "notes": "PARTIAL_REPRODUCTION: reproduced accepted sub-failure (r04-network-idempotency); expected native-lease-epoch-expiry remains uncovered",
+      "notes": "PARTIAL_REPRODUCTION: reproduced accepted sub-failure (native-network-idempotency); expected native-lease-epoch-expiry remains uncovered",
       "normalizedKinds": [
         "OMISSION"
       ],
@@ -38,6 +41,7 @@
       ],
       "pinnedEventKinds": [],
       "violatedInvariants": [
+        "native-network-idempotency",
         "r04-network-idempotency"
       ],
       "findings": []
@@ -59,7 +63,10 @@
           "targetVowelId": "vowel-2-1",
           "params": {
             "loadUnits": 70
-          }
+          },
+          "targetName": "edge-proxy",
+          "businessTarget": "edge-proxy",
+          "description": "SATURATE affects edge-proxy [vowel-2-1]"
         }
       ],
       "modelGap": false,
@@ -84,7 +91,7 @@
       "matchedRuleId": true,
       "matchedDepth": true,
       "matchedCliff": true,
-      "actualRuleId": "r04-network-idempotency",
+      "actualRuleId": "native-network-idempotency",
       "actualDepth": 1,
       "actualCliffMs": null,
       "actualCounterexample": [
@@ -93,7 +100,10 @@
           "targetVowelId": "vowel-1-1",
           "params": {
             "phase": "POST_COMMIT"
-          }
+          },
+          "targetName": "AI → Stripe",
+          "businessTarget": "AI → Stripe",
+          "description": "SEVER affects AI → Stripe [vowel-1-1]"
         }
       ],
       "modelGap": false,
@@ -106,6 +116,7 @@
       ],
       "pinnedEventKinds": [],
       "violatedInvariants": [
+        "native-network-idempotency",
         "r04-network-idempotency"
       ],
       "findings": []
@@ -127,7 +138,10 @@
           "targetVowelId": "vowel-1-1",
           "params": {
             "count": 1000
-          }
+          },
+          "targetName": "trade-engine → retry-broker",
+          "businessTarget": "trade-engine → retry-broker",
+          "description": "DUPLICATE affects trade-engine → retry-broker [vowel-1-1]"
         }
       ],
       "modelGap": false,
@@ -161,7 +175,10 @@
           "targetVowelId": "vowel-1-1",
           "params": {
             "loadUnits": 200
-          }
+          },
+          "targetName": "metadata-service",
+          "businessTarget": "metadata-service",
+          "description": "SATURATE affects metadata-service [vowel-1-1]"
         }
       ],
       "modelGap": false,

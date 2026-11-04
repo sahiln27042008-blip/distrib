@@ -153,12 +153,12 @@ export const PROPOSE_FIX_SCHEMA = {
       type: "object",
       description: "MatrixConfig that produced the finding (optional; inferred from session memory if omitted)",
       properties: {
-        A: Array.from(VALID_A),
-        B: Array.from(VALID_B),
-        C: Array.from(VALID_C),
-        D: Array.from(VALID_D),
-        E: Array.from(VALID_E),
-        F: Array.from(VALID_F),
+        A: { type: "string", enum: Array.from(VALID_A) },
+        B: { type: "string", enum: Array.from(VALID_B) },
+        C: { type: "string", enum: Array.from(VALID_C) },
+        D: { type: "string", enum: Array.from(VALID_D) },
+        E: { type: "string", enum: Array.from(VALID_E) },
+        F: { type: "string", enum: Array.from(VALID_F) },
       },
     },
     systemDescription: {

@@ -68,7 +68,7 @@ function httpRequest(
   });
 }
 
-test("tools/list returns 12 tools including run_gate", async () => {
+test("tools/list returns all 15 registered tools including run_gate", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -89,7 +89,7 @@ test("tools/list returns 12 tools including run_gate", async () => {
     assert.equal(listRes.statusCode, 200);
     const tools = listRes.body.tools || listRes.body.result?.tools;
     assert.ok(Array.isArray(tools));
-    assert.equal(tools.length, 12);
+    assert.equal(tools.length, 15);
 
     const names = tools.map((t: any) => t.name);
     assert.ok(names.includes("describe_system"));
@@ -107,7 +107,7 @@ test("tools/list returns 12 tools including run_gate", async () => {
   }
 });
 
-test("tools/call with run_gate returns gate decision (status, reason, discoveredFailures, patches)", async () => {
+test("tools/call with run_gate returns a coverage report (status, reason, discoveredFailures, patches)", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -144,7 +144,7 @@ test("tools/call with run_gate returns gate decision (status, reason, discovered
     assert.equal(success, true);
 
     const status = callRes.body.status ?? callRes.body.result?.status;
-    assert.equal(status, "BLOCKED");
+    assert.equal(status, "COVERAGE_REPORT");
 
     const reason = callRes.body.reason ?? callRes.body.result?.reason;
     assert.ok(typeof reason === "string" && reason.length > 0);
@@ -165,7 +165,7 @@ test("tools/call with run_gate returns gate decision (status, reason, discovered
   }
 });
 
-test("tools/call with run_gate on resilient config returns APPROVED", async () => {
+test("tools/call with run_gate on resilient config returns a coverage report", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -212,7 +212,7 @@ test("tools/call with run_gate on resilient config returns APPROVED", async () =
     assert.equal(success, true);
 
     const status = callRes.body.status ?? callRes.body.result?.status;
-    assert.equal(status, "APPROVED");
+    assert.equal(status, "COVERAGE_REPORT");
 
     const reason = callRes.body.reason ?? callRes.body.result?.reason;
     assert.ok(typeof reason === "string" && reason.length > 0);

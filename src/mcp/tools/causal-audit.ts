@@ -156,6 +156,8 @@ export function workflowToGraph(workflow: Workflow): CompiledAlphabetGraph {
   }
 
   let edges: { source: Workflow["nodes"][number]; target: Workflow["nodes"][number] }[] = [];
+  const unresolvedEdges: Array<{ source: string; target: string }> = [];
+
   if (hasExplicitEdges) {
     const byName = new Map(workflow.nodes.map((node) => [node.nodeName, node]));
     for (const source of workflow.nodes) {
@@ -163,7 +165,10 @@ export function workflowToGraph(workflow: Workflow): CompiledAlphabetGraph {
       for (const targetName of source.outboundEdges) {
         const target = byName.get(targetName);
         if (!target) {
-          throw new Error(`workflowToGraph: node '${source.nodeName}' has outboundEdge to unknown target '${targetName}'`);
+          // Do NOT throw on forward references or missing targets:
+          // Skip the edge, record as unresolved, and continue audit on partial graph.
+          unresolvedEdges.push({ source: source.nodeName, target: targetName });
+          continue;
         }
         edges.push({ source, target });
       }
@@ -202,8 +207,12 @@ export function workflowToGraph(workflow: Workflow): CompiledAlphabetGraph {
     channels,
     contracts: [],
     candidatePerturbations,
-    epistemicStatus: hasExplicitEdges ? ["OBSERVED"] : ["INFERRED"],
-    unrepresentableSemantics: hasExplicitEdges ? [] : ["Workflow dependencies are approximated as a sequential chain because the workflow store has no edge model."],
+    epistemicStatus: (hasExplicitEdges && unresolvedEdges.length === 0) ? ["OBSERVED"] : ["INFERRED"],
+    unrepresentableSemantics: [
+      ...(!hasExplicitEdges ? ["Workflow dependencies are approximated as a sequential chain because the workflow store has no edge model."] : []),
+      ...(unresolvedEdges.length > 0 ? [`Workflow has unresolved outbound edges: ${unresolvedEdges.map(e => `${e.source} -> ${e.target}`).join(", ")}. Graph is partial.`] : []),
+    ],
+    unresolvedEdges,
   };
 }
 
@@ -320,6 +329,10 @@ export const causalAuditTool: McpTool = {
         type: "string",
         description: "Scenario ID to evaluate",
       },
+      workflowId: {
+        type: "string",
+        description: "Workflow ID to evaluate (alias for scenarioId)",
+      },
       maxDepth: {
         type: "number",
         description: "Max fault interaction depth (default 2)",
@@ -331,17 +344,22 @@ export const causalAuditTool: McpTool = {
         default: 42817,
       },
     },
-    required: ["scenarioId"],
+    required: [],
   },
   async handler(args: Record<string, unknown>, context?: ToolContext): Promise<ToolResult> {
-    const scenarioId = args.scenarioId as string | undefined;
+    const rawId = typeof args.scenarioId === 'string' && args.scenarioId.trim()
+      ? args.scenarioId.trim()
+      : typeof args.workflowId === 'string' && args.workflowId.trim()
+        ? args.workflowId.trim()
+        : '';
 
-    if (!scenarioId || typeof scenarioId !== "string" || scenarioId.trim() === "") {
+    if (!rawId) {
       return {
         success: false,
-        error: "scenarioId is required",
+        error: 'scenarioId is required (or workflowId for stored workflows)',
       };
     }
+    const scenarioId = rawId;
 
     const normalizedScenarioId = scenarioId.trim().replace(/\./g, "-").toLowerCase();
     const scenario = resolveScenario(normalizedScenarioId);
@@ -380,6 +398,29 @@ export const causalAuditTool: McpTool = {
     const startedAt = performance.now();
     const graph = scenario ? scenario.buildGraph() : workflowToGraph(workflow!);
 
+    const unresolvedEdges = Array.isArray((graph as any).unresolvedEdges)
+      ? (graph as any).unresolvedEdges as Array<{ source: string; target: string }>
+      : [];
+    if (!scenario && unresolvedEdges.length > 0) {
+      const edgeList = unresolvedEdges.map((edge) => `${edge.source} -> ${edge.target}`).join(", ");
+      return {
+        success: true,
+        verdict: "BLOCKED",
+        status: "GRAPH_INCOMPLETE",
+        scenarioId: workflow?.id,
+        shortestDepth: null,
+        minimalCounterexample: [],
+        violatedInvariants: [],
+        evaluationsCount: 0,
+        durationMs: performance.now() - startedAt,
+        executiveSummary: `BLOCKED: workflow graph is incomplete; unresolved edge(s): ${edgeList}.`,
+        graphCompleteness: {
+          complete: false,
+          unresolvedEdges,
+        },
+      };
+    }
+
     if (scenario?.candidateFaults && scenario.candidateFaults.length > 0) {
       graph.candidatePerturbations = scenario.candidateFaults.map((f) => ({
         consonant: { kind: f.consonantKind, ...f.params } as any,
@@ -399,6 +440,37 @@ export const causalAuditTool: McpTool = {
 
       const isApproved = searchResult.status === "NO_FAILURE_WITHIN_BOUND";
       const verdict = isApproved ? "APPROVED" : "BLOCKED";
+      const actorNames = new Map(graph.actors.map((actor) => [actor.id, actor.name]));
+      const getBusinessTarget = (targetVowelId: string): string => {
+        const target = graph.vowels.find((vowel) => vowel.id === targetVowelId);
+        if (target?.kind === "CHANNEL") {
+          const src = actorNames.get((target as Channel).sourceActorId) ?? (target as Channel).sourceActorId;
+          const tgt = actorNames.get((target as Channel).targetActorId) ?? (target as Channel).targetActorId;
+          return `${src} → ${tgt}`;
+        }
+        if (target) {
+          return actorNames.get(target.actorId) ?? target.actorId;
+        }
+        return targetVowelId;
+      };
+
+      const enrichedCounterexample = (searchResult.minimalCounterexample ?? []).map((fault) => {
+        const businessTarget = getBusinessTarget(fault.targetVowelId);
+        return {
+          ...fault,
+          targetName: businessTarget,
+          businessTarget,
+          description: `${fault.consonantKind} affects ${businessTarget} [${fault.targetVowelId}]`,
+        };
+      });
+      const counterexampleSummary = enrichedCounterexample;
+      const failurePathStr = enrichedCounterexample.map((c) => c.businessTarget).join(", ");
+      const executiveSummary = isApproved
+        ? `APPROVED: ${scenario?.name ?? workflow?.name ?? scenarioId}; No invariant violations found.`
+        : `BLOCKED: ${scenario?.name ?? workflow?.name ?? scenarioId}; ${searchResult.violatedInvariants.join(", ")} violated on ${failurePathStr || "fault trajectory"}.`;
+      const verdictSummary = isApproved
+        ? `APPROVED: ${scenario?.name ?? workflow?.name ?? scenarioId}`
+        : `BLOCKED: ${scenario?.name ?? workflow?.name ?? scenarioId} [${enrichedCounterexample.map((c) => `${c.consonantKind} on ${c.businessTarget}`).join(" + ") || "violation"}]`;
 
       return {
         success: true,
@@ -410,11 +482,16 @@ export const causalAuditTool: McpTool = {
           : isApproved
             ? null
             : searchResult.depthReached,
-        minimalCounterexample: searchResult.minimalCounterexample ?? [],
+        minimalCounterexample: enrichedCounterexample,
+        failurePath: failurePathStr,
+        verdictSummary,
         violatedInvariants: searchResult.violatedInvariants ?? [],
         evaluationsCount: searchResult.evaluations,
         durationMs: searchResult.durationMs ?? performance.now() - startedAt,
         fingerprint: searchResult.deterministicFingerprint,
+        executiveSummary,
+        graphCompleteness: { complete: true, unresolvedEdges: [] },
+        counterexampleSummary,
       };
     } catch (err: any) {
       return {

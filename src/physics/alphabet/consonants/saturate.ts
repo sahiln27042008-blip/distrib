@@ -25,6 +25,22 @@ export function applySaturate(
   });
 
   if (target instanceof Lease) {
+    if ((target as any).shedAtThresholdEnabled) {
+      sim.emit("lease.load_shed", target.id, {
+        leaseId: target.id,
+        attemptedUnits: loadUnits,
+        policy: "SHED_BEFORE_SATURATION",
+        threshold: (target as any).shedThreshold ?? 0.56,
+        capacity: target.maxCapacity,
+      });
+      return {
+        ok: true,
+        consonant: "SATURATE",
+        targetId: target.id,
+        details: { shed: true, message: "Load shed at threshold before pool saturation" },
+      };
+    }
+
     const prefix = opts.requesterPrefix ?? "saturate-client";
     let appliedUnits = 0;
     let overflowResult: { rejected?: boolean; panicked?: boolean; waitMs?: number } | undefined;

@@ -69,7 +69,7 @@ function httpRequest(
   });
 }
 
-test("tools/list returns 10 tools with correct names", async () => {
+test("tools/list returns all 15 registered tools with correct names", async () => {
   const mcp = await startMcpServer({ port: 0 });
   try {
     const initRes = await httpRequest(mcp.port, {
@@ -90,7 +90,7 @@ test("tools/list returns 10 tools with correct names", async () => {
     assert.equal(listRes.statusCode, 200);
     const tools = listRes.body.tools || listRes.body.result?.tools;
     assert.ok(Array.isArray(tools));
-    assert.equal(tools.length, 10);
+    assert.equal(tools.length, 15);
 
     const names = tools.map((t: any) => t.name);
     assert.ok(names.includes("describe_system"));

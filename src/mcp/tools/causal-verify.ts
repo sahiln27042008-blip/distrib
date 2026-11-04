@@ -28,6 +28,10 @@ export const causalVerifyTool: McpTool = {
           "release_before_llm",
           "outbound_transport_dedup",
           "channel_dedup",
+          "shed_at_threshold",
+          "shed_at_56",
+          "admission_control",
+          "load_shedding",
         ],
       },
       ablations: {
@@ -72,12 +76,16 @@ export const causalVerifyTool: McpTool = {
       release_before_llm: "zero_hold_lease",
       outbound_transport_dedup: "channel_idempotency",
       channel_dedup: "channel_idempotency",
+      shed_at_56: "shed_at_threshold",
+      admission_control: "shed_at_threshold",
+      load_shedding: "shed_at_threshold",
     };
     const supportedAblations = new Set([
       "channel_idempotency",
       "enforce_idempotency",
       "fencing_token_enabled",
       "zero_hold_lease",
+      "shed_at_threshold",
     ]);
 
     const normalizedAblations: string[] = [];
@@ -130,9 +138,17 @@ export const causalVerifyTool: McpTool = {
         if (normalizedAblations.includes("fencing_token_enabled")) {
           (vowel as any).fencingTokenEnforced = true;
         }
+        if (normalizedAblations.includes("shed_at_threshold")) {
+          (vowel as any).shedAtThresholdEnabled = true;
+          (vowel as any).shedThreshold = 0.56;
+        }
       } else if (vowel.kind === "LEASE" && vowel instanceof Lease) {
         if (normalizedAblations.includes("zero_hold_lease")) {
           (vowel as any).heldDuringExternalChannel = false;
+        }
+        if (normalizedAblations.includes("shed_at_threshold")) {
+          (vowel as any).shedAtThresholdEnabled = true;
+          (vowel as any).shedThreshold = 0.56;
         }
       } else if (vowel.kind === "CHANNEL" && vowel instanceof Channel) {
         if (normalizedAblations.includes("channel_idempotency") || normalizedAblations.includes("enforce_idempotency")) {
@@ -169,9 +185,39 @@ export const causalVerifyTool: McpTool = {
       const regressionCheck = isApproved ? "PASSED" : "FAILED";
       const immuneUpToDepth = isApproved ? searchResult.depthReached : 0;
 
+      const actorNames = new Map(graph.actors.map((actor) => [actor.id, actor.name]));
+      const getBusinessTarget = (targetVowelId: string): string => {
+        const target = graph.vowels.find((vowel) => vowel.id === targetVowelId);
+        if (target?.kind === "CHANNEL") {
+          const src = actorNames.get((target as Channel).sourceActorId) ?? (target as Channel).sourceActorId;
+          const tgt = actorNames.get((target as Channel).targetActorId) ?? (target as Channel).targetActorId;
+          return `${src} → ${tgt}`;
+        }
+        if (target) {
+          return actorNames.get(target.actorId) ?? target.actorId;
+        }
+        return targetVowelId;
+      };
+
+      const enrichedCounterexample = (searchResult.minimalCounterexample ?? []).map((fault) => {
+        const businessTarget = getBusinessTarget(fault.targetVowelId);
+        return {
+          ...fault,
+          targetName: businessTarget,
+          businessTarget,
+          description: `${fault.consonantKind} affects ${businessTarget} [${fault.targetVowelId}]`,
+        };
+      });
+
+      const failurePathStr = enrichedCounterexample.map((c) => c.businessTarget).join(", ");
+      const verdictSummary = isApproved
+        ? `APPROVED: ${scenario?.name ?? workflow?.name ?? scenarioId} - Invariant verified under ${normalizedAblations.join("+")}`
+        : `BLOCKED: ${scenario?.name ?? workflow?.name ?? scenarioId} - Violated: ${searchResult.violatedInvariants.join(", ")} on ${failurePathStr || "fault trajectory"}`;
+
       return {
         success: true,
         verdict,
+        verdictSummary,
         status: searchResult.status,
         scenarioId: scenario?.id ?? workflow?.id,
         ablation: normalizedAblations.length === 1 ? normalizedAblations[0] : normalizedAblations.join("+"),
@@ -183,7 +229,8 @@ export const causalVerifyTool: McpTool = {
           : isApproved
             ? null
             : searchResult.depthReached,
-        minimalCounterexample: searchResult.minimalCounterexample ?? [],
+        minimalCounterexample: enrichedCounterexample,
+        failurePath: failurePathStr,
         violatedInvariants: searchResult.violatedInvariants ?? [],
         evaluationsCount: searchResult.evaluations,
         durationMs: performance.now() - startedAt,

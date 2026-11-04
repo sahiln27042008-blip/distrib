@@ -118,6 +118,7 @@ export interface CompiledAlphabetGraph {
   candidatePerturbations: CandidatePerturbation[];
   epistemicStatus: EpistemicState[];
   unrepresentableSemantics: string[];
+  unresolvedEdges?: Array<{ source: string; target: string }>;
   provenance?: ProvenanceRecord[];
 }
 

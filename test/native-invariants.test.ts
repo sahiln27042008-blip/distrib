@@ -248,6 +248,29 @@ test("H. native findings survive an unavailable external auditor", async () => {
   }
 });
 
+test("native-network-idempotency fires for retry without dedup key when external auditor is unavailable", async () => {
+  const channel = new Channel({
+    id: "channel-retry-without-key",
+    sourceActorId: "actor-client",
+    targetActorId: "actor-service",
+    timeoutMs: 50,
+    idempotencyEnabled: false,
+  });
+  const result = await executeFaultSequence(graph([channel], [channel]), [{
+    consonantKind: "SEVER",
+    targetVowelId: channel.id,
+    params: { phase: "POST_COMMIT" },
+  }], 42);
+
+  const finding = nativeFindings(result, "native-network-idempotency")[0];
+  assert.ok(finding, "expected a native network idempotency finding");
+  assert.equal(finding.status, "proven");
+  assert.equal(finding.severity, "critical");
+  assert.ok(result.events.some((event) => event.kind === "channel.retry"));
+  assert.ok(result.events.some((event) => event.kind === "channel.send"));
+  assert.ok(finding.evidence.span_ids.length >= 2);
+});
+
 test("I. native and external findings merge without duplicate rule/span pairs", async () => {
   const overflowLease = new Lease({
     id: "lease-overflow",

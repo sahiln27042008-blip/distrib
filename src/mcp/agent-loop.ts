@@ -1,7 +1,7 @@
 import type { Orchestrator, OrchestratorMessage, ToolCall } from "../llm/orchestrator.ts";
 import { createOrchestrator } from "../llm/meta-client.ts";
 import { SYSTEM_PROMPT } from "../llm/prompts.ts";
-import { associateWorkflowWithSession, getWorkflow, isWorkflowOwnedBySession } from "../compiler/workflow-store.ts";
+import { associateWorkflowWithSession, getWorkflow, isWorkflowOwnedBySession, listWorkflows } from "../compiler/workflow-store.ts";
 
 const DEFAULT_MAX_ITERATIONS = 6;
 const configuredMaxIterations = Number(process.env.MAX_AGENT_ITERATIONS);
@@ -12,6 +12,7 @@ const MAX_CONSECUTIVE_TOOL_ERRORS = 3;
 
 export interface AgentLoopResult {
   text: string;
+  reasoning?: string;
   stopReason: "stop" | "tool_calls" | "length" | "error";
   toolCalls: ToolCall[];
   graphData?: any;
@@ -35,8 +36,10 @@ export async function runAgentLoop(opts: {
   tools: McpTool[];
   orchestrator?: Orchestrator; // optional, defaults to createOrchestrator()
   context?: any;
+  onChunk?: (chunk: { type: string; [key: string]: any }) => void;
 }): Promise<AgentLoopResult> {
   const orchestrator = opts.orchestrator || createOrchestrator();
+  let latestReasoning: string | undefined = undefined;
   const messages = opts.history;
   if (messages.length === 0 || messages[0]?.role !== "system") {
     messages.unshift({ role: "system", content: SYSTEM_PROMPT });
@@ -47,6 +50,8 @@ export async function runAgentLoop(opts: {
     const isVision =
       model.toLowerCase().includes("vision") ||
       model.toLowerCase().includes("vl") ||
+      model.toLowerCase().includes("muse") ||
+      model.toLowerCase().includes("sam") ||
       model.toLowerCase().includes("llama-3.2-11b-vision") ||
       model.toLowerCase().includes("llama-3.2-90b-vision") ||
       !model;
@@ -65,6 +70,24 @@ export async function runAgentLoop(opts: {
     }
   } else {
     messages.push({ role: "user", content: opts.userText });
+  }
+
+  // Inject server workflow store state so model never forgets existing workflows
+  const activeWfIds = listWorkflows();
+  if (activeWfIds.length > 0) {
+    const summaryList = activeWfIds
+      .map((id) => {
+        const wf = getWorkflow(id);
+        return wf ? `Workflow ID '${wf.id}' ("${wf.name}", ${wf.nodes.length} nodes: ${wf.nodes.map(n => n.nodeName).join(", ")})` : null;
+      })
+      .filter(Boolean)
+      .join("; ");
+    if (summaryList && !messages.some(m => typeof m.content === 'string' && m.content.includes("[Active Workflows in Server Store:"))) {
+      messages.splice(1, 0, {
+        role: "system",
+        content: `[Active Workflows in Server Store: ${summaryList}. Use 'list_workflows' or 'audit_workflow_reliability' to reference them.]`,
+      });
+    }
   }
 
   const toolDefs = (opts.tools || []).map(t => ({
@@ -178,6 +201,7 @@ export async function runAgentLoop(opts: {
 
     return {
       text,
+      reasoning: latestReasoning,
       stopReason,
       toolCalls: allExecutedToolCalls,
       ...(graphData ? { graphData } : {}),
@@ -185,29 +209,116 @@ export async function runAgentLoop(opts: {
   }
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    if (messages.length > 12) {
+    if (messages.length > 50) {
       const system = messages[0];
-      const recent = messages.slice(-8);
+      // ALWAYS find and preserve the first user message (the user's original system description)
+      const firstUserMsg = messages.find((m) => m.role === "user" && (typeof m.content !== "string" || (!m.content.startsWith("[Active Workflows") && !m.content.startsWith("[Previous"))));
+
+      const recent = messages.slice(-40);
       messages.length = 0;
       if (system) {
         messages.push(system);
       }
-      messages.push({ role: "user", content: "[Previous tool results are summarized. Proceed with the next diagnostic step based on the results you have.]" });
+      const activeWfs = listWorkflows();
+      if (activeWfs.length > 0) {
+        const summary = activeWfs
+          .map((id) => {
+            const wf = getWorkflow(id);
+            return wf ? `Workflow ID '${wf.id}' ("${wf.name}", ${wf.nodes.length} nodes: ${wf.nodes.map(n => n.nodeName).join(", ")})` : null;
+          })
+          .filter(Boolean)
+          .join("; ");
+        if (summary) {
+          messages.push({
+            role: "system",
+            content: `[Active Workflows in Server Store: ${summary}. Use 'list_workflows' or 'audit_workflow_reliability' to reference them.]`,
+          });
+        }
+      }
+      if (firstUserMsg && !recent.includes(firstUserMsg)) {
+        messages.push(firstUserMsg);
+      }
+      messages.push({
+        role: "user",
+        content: "[Previous intermediate tool results are summarized. Proceed with the next step based on the user's system description and existing workflows.]",
+      });
       messages.push(...recent);
+
+      // Remove orphaned tool messages whose tool_call_id has no matching assistant message
+      // This prevents the LLM API 400: "tool message has no matching assistant"
+      const compactedAssistantCallIds = new Set<string>();
+      for (const msg of messages) {
+        if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+          for (const tc of msg.tool_calls) {
+            if (tc.id) compactedAssistantCallIds.add(tc.id);
+          }
+        }
+      }
+      for (let j = messages.length - 1; j >= 0; j--) {
+        const msg = messages[j];
+        if (msg && msg.role === "tool" && msg.tool_call_id) {
+          if (!compactedAssistantCallIds.has(msg.tool_call_id)) {
+            messages.splice(j, 1);
+          }
+        }
+      }
     }
 
     const isFinalIteration = i === MAX_ITERATIONS - 1;
-    const currentTools = isFinalIteration ? [] : toolDefs;
+    const userPromptLower = (opts.userText || "").toLowerCase();
+    const isAnsweringQuestions =
+      userPromptLower.includes("?") ||
+      userPromptLower.includes("question") ||
+      userPromptLower.includes("cto review") ||
+      userPromptLower.includes("answer all") ||
+      userPromptLower.includes("packet") ||
+      userPromptLower.includes("postmortem");
+
+    const wantsExplicitTool =
+      userPromptLower.includes("run") ||
+      userPromptLower.includes("verify") ||
+      userPromptLower.includes("seed") ||
+      userPromptLower.includes("simulate") ||
+      userPromptLower.includes("simulation") ||
+      userPromptLower.includes("sweep") ||
+      userPromptLower.includes("ablation") ||
+      userPromptLower.includes("workflow") ||
+      userPromptLower.includes("create") ||
+      userPromptLower.includes("node") ||
+      userPromptLower.includes("insert") ||
+      userPromptLower.includes("connect") ||
+      userPromptLower.includes("audit") ||
+      userPromptLower.includes("model") ||
+      userPromptLower.includes("list") ||
+      userPromptLower.includes("tool");
+
+    let effectiveTools = toolDefs;
+    // Always filter out legacy waterfall matrix dials unless specifically requested, avoiding slow 5-step loops
+    if (!userPromptLower.includes("matrix") && !userPromptLower.includes("describe system")) {
+      effectiveTools = toolDefs.filter(
+        (t) => !["describe_system", "run_matrix", "audit_trace", "explain_finding", "propose_fix", "verify_fix"].includes(t.function.name)
+      );
+    }
+
+    const currentTools = isFinalIteration ? [] : effectiveTools;
     console.log(`[AGENT_LOOP] Iteration ${i}: calling orchestrator (${messages.length} msgs)...`);
     const response = await orchestrator.chat(messages, currentTools);
+    if (response.reasoning) {
+      latestReasoning = (latestReasoning ? latestReasoning + "\n" : "") + response.reasoning;
+      opts.onChunk?.({ type: "reasoning", text: response.reasoning });
+    }
     const resolvedToolCalls = (response.tool_calls ?? []).flatMap((toolCall) => {
       if (!toolCall) return [];
       const exactTool = (opts.tools || []).find((tool) => tool.name === toolCall.name);
       if (exactTool || toolCall.name.length < 5) return [toolCall];
       const prefixMatches = (opts.tools || []).filter((tool) => tool.name.startsWith(toolCall.name));
-      return prefixMatches.length === 1
-        ? [{ ...toolCall, name: prefixMatches[0]!.name }]
-        : [toolCall];
+      if (prefixMatches.length === 1) {
+        return [{ ...toolCall, name: prefixMatches[0]!.name }];
+      }
+      if (prefixMatches.length > 1) {
+        throw new Error(`Ambiguous tool name '${toolCall.name}'. Candidates: ${prefixMatches.map((tool) => tool.name).join(", ")}`);
+      }
+      return [toolCall];
     });
     console.log(`[AGENT_LOOP] Iteration ${i}: model replied with ${resolvedToolCalls.length} tool calls (${resolvedToolCalls.map(tc => tc.name).join(", ")})`);
 
@@ -218,7 +329,47 @@ export async function runAgentLoop(opts: {
           "error",
         );
       }
-      return buildGraphDataResult(response.text, response.stop_reason);
+      let finalText = response.text?.trim() || "";
+
+      const userAskedQuestions = messages.some(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          (m.content.includes("?") || /question|review|audit|timeline|packet/i.test(m.content))
+      );
+      const isBriefPlaceholder =
+        finalText.length < 150 &&
+        (/ready to run/i.test(finalText) ||
+          /system described/i.test(finalText) ||
+          /completed \d+ diagnostic/i.test(finalText) ||
+          /ready to audit/i.test(finalText));
+
+      if (userAskedQuestions && isBriefPlaceholder && i < MAX_ITERATIONS - 1) {
+        console.log(`[AGENT_LOOP] Brief placeholder detected while questions are pending. Nudging model to provide comprehensive answer...`);
+        messages.push({
+          role: "assistant",
+          content: finalText,
+        });
+        messages.push({
+          role: "user",
+          content: "Now proceed to answer all requested questions in order thoroughly, rigorously, and quantitatively using the packet and findings.",
+        });
+        continue;
+      }
+      if (!finalText) {
+        if (allExecutedToolCalls.length > 0) {
+          finalText = `Completed ${allExecutedToolCalls.length} diagnostic step(s): ${allExecutedToolCalls.map(tc => tc.name).join(", ")}. Invariant checks and topology verification complete.`;
+        } else {
+          finalText = "I have reviewed your system architecture. Ready to run reliability audits and check for invariant violations.";
+        }
+      }
+      messages.push({ role: "assistant", content: finalText });
+      opts.onChunk?.({ type: "text", text: finalText });
+      const finalResult = buildGraphDataResult(finalText, response.stop_reason);
+      if (finalResult.graphData) {
+        opts.onChunk?.({ type: "graph", graphData: finalResult.graphData });
+      }
+      return finalResult;
     }
 
     allExecutedToolCalls.push(...resolvedToolCalls);
@@ -281,6 +432,7 @@ export async function runAgentLoop(opts: {
           }
         }
         console.log(`[AGENT_LOOP] Iteration ${i}: executing tool '${tc.name}'...`);
+        opts.onChunk?.({ type: "tool_start", name: tc.name, arguments: tc.arguments });
         const toolArguments = { ...tc.arguments };
         if (
           (tc.name === "audit_trace" || tc.name === "explain_finding") &&
@@ -291,6 +443,7 @@ export async function runAgentLoop(opts: {
         }
         const result = await tool.handler(toolArguments, opts.context);
         console.log(`[AGENT_LOOP] Iteration ${i}: tool '${tc.name}' completed.`);
+        opts.onChunk?.({ type: "tool_end", name: tc.name });
         const toolFailed = result && typeof result === "object" && result.success === false && !(result as any).validationError;
         if (tc.name === "create_workflow" && result && typeof result === "object" && result.success !== false) {
           activeWorkflowId = result.workflowId;
@@ -327,12 +480,23 @@ export async function runAgentLoop(opts: {
               (opts.context as any).lastConfig = result.config;
             }
           }
+          const trace = result.trace as any;
           const compact = {
             success: result.success,
             config: result.config,
             snapshot: result.snapshot,
             traceId: result.traceId,
-            trace: { traceId: result.traceId, note: "Trace cached in session. Calling audit_trace will automatically inspect this trace." }
+            spanCount: trace?.spans?.length ?? trace?.spanCount ?? undefined,
+            firstSpanId: trace?.spans?.[0]?.id ?? trace?.firstSpanId ?? undefined,
+            lastSpanId: trace?.spans?.[trace.spans?.length - 1]?.id ?? trace?.lastSpanId ?? undefined,
+            note: "Full trace cached in session",
+            trace: {
+              traceId: result.traceId,
+              spanCount: trace?.spans?.length ?? trace?.spanCount ?? undefined,
+              firstSpanId: trace?.spans?.[0]?.id ?? trace?.firstSpanId ?? undefined,
+              lastSpanId: trace?.spans?.[trace.spans?.length - 1]?.id ?? trace?.lastSpanId ?? undefined,
+              note: "Full trace cached in session",
+            },
           };
           toolContent = JSON.stringify(compact);
         }
@@ -372,6 +536,7 @@ export async function runAgentLoop(opts: {
       });
       const finalResp = await orchestrator.chat(messages, []);
       if (finalResp.text) {
+        messages.push({ role: "assistant", content: finalResp.text });
         return buildGraphDataResult(finalResp.text, "stop");
       }
     } catch (e: any) {

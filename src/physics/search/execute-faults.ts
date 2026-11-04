@@ -396,6 +396,8 @@ export async function executeFaultSequence(
         heldDuringExternalChannel: l.heldDuringExternalChannel,
         sim,
       });
+      (lease as any).shedAtThresholdEnabled = (l as any).shedAtThresholdEnabled;
+      (lease as any).shedThreshold = (l as any).shedThreshold;
       leaseMap.set(lease.id, lease);
       vowelMap.set(lease.id, lease);
     } else if (v.kind === "LOG") {
@@ -496,7 +498,7 @@ export async function executeFaultSequence(
       (fault) => fault.targetVowelId === targetLease?.id && fault.consonantKind === "SATURATE",
     );
 
-    if (targetLease && saturationFaultExists && targetLease.currentLoad >= targetLease.maxCapacity) {
+    if (targetLease && saturationFaultExists && targetLease.currentLoad >= targetLease.maxCapacity && !(targetLease as any).shedAtThresholdEnabled) {
       sim.emit("channel.cascade_failure", ch.id, {
         channelId: ch.id,
         sourceActorId: ch.sourceActorId,
@@ -547,7 +549,7 @@ export async function executeFaultSequence(
           const retryDedupKey = effectiveIdempotencyEnabled
             ? `sha256(wf+${ch.sourceActorId}+${sha(payload)})`
             : undefined;
-          ch.send(sim, payload, targetCell, { dedupKey: retryDedupKey });
+          ch.send(sim, payload, targetCell, { dedupKey: retryDedupKey, retryAttempt: 1 });
         }
       }
     } else {
