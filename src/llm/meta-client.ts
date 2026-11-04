@@ -232,7 +232,7 @@ export function createMetaOrchestrator(config: MetaClientConfig): Orchestrator {
 }
 
 function ensureEnvLoaded(): void {
-  if (process.env.META_BASE_URL2 && process.env.META_API_KEY2) return;
+  if (process.env.META_BASE_URL && process.env.META_API_KEY) return;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require("node:fs");
@@ -293,16 +293,6 @@ export function createOrchestrator(): Orchestrator {
   ensureEnvLoaded();
   const orchestrators: Orchestrator[] = [];
 
-  if (process.env.META_BASE_URL2 && process.env.META_API_KEY2) {
-    orchestrators.push(
-      new MetaClient({
-        apiKey: process.env.META_API_KEY2,
-        baseUrl: process.env.META_BASE_URL2,
-        model: process.env.META_MODEL2 || "muse-spark-1.3",
-        timeoutMs: Number(process.env.META_TIMEOUT_MS) || 600000,
-      })
-    );
-  }
   if (process.env.META_BASE_URL && process.env.META_API_KEY) {
     orchestrators.push(
       new MetaClient({
